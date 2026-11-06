@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+project=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+architecture=$1
+case "$architecture" in
+	amd64) heading='^## '; suffix='/$repo/os/$arch' ;;
+	arm64) heading='^### '; suffix='/$arch/$repo' ;;
+	*) exit 2 ;;
+esac
+
+# Keep the installer defaults first, then import the signed bootstrap's list.
+awk -F '\t' -v heading="$heading" -v suffix="$suffix" '
+	BEGIN { OFS = "\t"; region = "Worldwide" }
+	NR == FNR { seen[$2] = 1; print; next }
+	$0 ~ heading {
+		region = $0
+		sub(heading, "", region)
+		gsub(/,/, " /", region)
+		next
+	}
+	/^#?[[:space:]]*Server[[:space:]]*=/ {
+		url = $0
+		sub(/^#?[[:space:]]*Server[[:space:]]*=[[:space:]]*/, "", url)
+		if (substr(url, length(url) - length(suffix) + 1) != suffix) next
+		url = substr(url, 1, length(url) - length(suffix))
+		sub(/\/+$/, "", url)
+		if (url ~ /^https?:\/\/[^[:space:],]+$/ && !seen[url]++) print region, url
+	}
+' "$project/installer/mirrors/$architecture.tsv" "$2"

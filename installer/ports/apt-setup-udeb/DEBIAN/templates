@@ -1,0 +1,4 @@
+Template: debian-installer/apt-setup-udeb/title
+Type: text
+Description: Configure the Arch Linux package manager
+Description-zh_CN.UTF-8: 配置 Arch Linux 软件包管理器

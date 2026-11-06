@@ -1,0 +1,14 @@
+Template: triheart/grub/update-nvram
+Type: boolean
+Default: true
+Description: Update EFI boot entries to boot TriHeart automatically?
+Description-zh_CN.UTF-8: 更新 EFI 启动项以自动引导 TriHeart？
+
+Template: triheart/grub/install
+Type: text
+Description: Installing Arch Linux GRUB and building the boot configuration
+
+Template: triheart/grub/failed
+Type: error
+Description: Boot loader installation failed
+ ${REASON}

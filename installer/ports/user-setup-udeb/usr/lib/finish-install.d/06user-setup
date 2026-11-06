@@ -1,0 +1,10 @@
+#!/bin/sh
+. /usr/share/debconf/confmodule
+
+[ ! -f /run/triheart-users-applied ] || exit 0
+if ! user-setup-apply /target; then
+	db_input critical triheart/user-setup/failed || true
+	db_go || true
+	exit 10
+fi
+touch /run/triheart-users-applied

@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+file=/target/etc/pacman.d/mirrorlist
+/bin/sh /usr/lib/triheart/arch-mirrorlist > "$file.new"
+mv "$file.new" "$file"

@@ -1,0 +1,2 @@
+#!/bin/sh
+exec anna triheart-media default

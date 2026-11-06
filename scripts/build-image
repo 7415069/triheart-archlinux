@@ -1,0 +1,148 @@
+#!/bin/bash
+set -euo pipefail
+
+project=$(cd -- "$(dirname -- "$0")/.." && pwd)
+stage=$1 architecture=$2 build=$3 iso_name=$4
+sources="$build/01-sources"
+components="$build/02-components"
+initrd="$build/03-initrd"
+iso="$build/04-iso"
+work=$(mktemp -d)
+trap 'rm -rf -- "$work"' EXIT
+
+case "$stage" in
+	01-udeb-index)
+		xorriso -osirrox on -indev "$sources/debian-mini.iso" -extract /initrd.gz "$initrd/debian-initrd.gz"
+		kernel=$(pigz -dc "$initrd/debian-initrd.gz" \
+			| cpio -i --quiet --to-stdout var/lib/dpkg/status \
+			| sed -n 's/^Package: kernel-image-\(.*\)-di$/\1/p')
+		if [[ ! $kernel =~ ^[a-zA-Z0-9.+-]+-$architecture$ ]]; then
+			printf 'Could not identify the installer kernel in the Debian initrd.\n' >&2
+			exit 1
+		fi
+		mkdir "$sources/udebs/local"
+		pigz -dc "$sources/udebs/Packages.gz" | awk -v kernel="$kernel" '
+			BEGIN { RS = ""; FS = "\n"; ORS = "\n\n" }
+			{
+				for (i = 1; i <= NF; i++) {
+					if ($i ~ /^Kernel-Version: /) {
+						if ($i != "Kernel-Version: " kernel) next
+						matching_kernel = 1
+					}
+				}
+				print
+			}
+			END {
+				if (!matching_kernel) {
+					print "The Debian udeb index has no modules for " kernel > "/dev/stderr"
+					exit 1
+				}
+			}
+		' > "$sources/udebs/local/Packages"
+		;;
+	02-components)
+		if ! command -v xz >/dev/null; then
+			apt-get -o Acquire::Retries=3 install -y --no-install-recommends xz-utils
+		fi
+		dpkg-query -W -f='${Package}\t${Version}\n' cpio curl dpkg gpg gpgv pigz xorriso xz-utils zstd > "$components/build-tools.tsv"
+		"$project/scripts/build-component" "$components" "$architecture"
+		mv "$components/bootstrap-base_0.1.0_$architecture.udeb" "$components/bootstrap-base.udeb"
+		"$project/scripts/build-ports" "$work" "$sources/udebs" "$components" "$architecture"
+		for package in "$components"/*.udeb; do
+			dpkg-deb --show --showformat='${Package}\t${Version}\t${Architecture}\n' "$package"
+		done > "$components/packages.tsv"
+
+		if [[ $architecture == arm64 ]]; then
+			runtime="$work/root.aarch64"
+			mkdir "$runtime"
+			# Only the runtime for pacstrap is needed on the install medium.
+			pigz -dc "$sources/ArchLinuxARM-aarch64-latest.tar.gz" | tar -xf - -C "$runtime" \
+				--exclude=./boot --exclude=./usr/lib/modules --exclude=./usr/lib/firmware \
+				--exclude=./var/cache/pacman/pkg
+			install_scripts=("$sources"/arch-install-scripts-*.pkg.tar.xz)
+			tar -xJf "${install_scripts[0]}" -C "$runtime" usr/bin/arch-chroot usr/bin/pacstrap
+			cp "$runtime/etc/pacman.d/mirrorlist" "$components/upstream-mirrorlist"
+			tar -C "$work" -cf - root.aarch64 | pigz -n > "$components/arch-bootstrap.tar.gz"
+		else
+			archive=("$sources"/archlinux-bootstrap-*-x86_64.tar.zst)
+			zstd -dc "${archive[0]}" | tar -xOf - root.x86_64/etc/pacman.d/mirrorlist > "$components/upstream-mirrorlist"
+			zstd -dc "${archive[0]}" | pigz -n > "$components/arch-bootstrap.tar.gz"
+		fi
+		/bin/sh "$project/scripts/build-mirror-catalog" "$architecture" "$components/upstream-mirrorlist" > "$components/mirrors.tsv"
+		;;
+	03-initrd)
+		overlay="$initrd/overlay"
+		payload="$overlay/usr/lib/triheart"
+		startup="$overlay/usr/lib/debian-installer.d"
+		graphics="$overlay/usr/share/graphics"
+		install -d "$payload" "$startup" "$graphics"
+		for file in "$components"/*.udeb "$components/arch-bootstrap.tar.gz" "$components/mirrors.tsv"; do
+			ln "$file" "$payload/${file##*/}" || cp -p "$file" "$payload/"
+		done
+		cp -al "$sources/udebs/local" "$payload/udebs"
+		install -m 0644 "$project/installer/S59triheart-bootstrap" "$startup/S59triheart-bootstrap"
+		# rootskel-gtk links both of its banner names to these files.
+		install -m 0644 "$project/installer/branding/banner.png" "$graphics/logo_debian.png"
+		install -m 0644 "$project/installer/branding/banner.png" "$graphics/logo_debian_dark.png"
+
+		# The graphical installer needs the fonts before it asks for a locale.
+		dpkg-deb --fsys-tarfile "$sources/fonts-noto-cjk.deb" | tar -xf - -C "$overlay" \
+			./usr/share/fonts/opentype/noto/NotoSansCJK-{Regular,Bold}.ttc \
+			./usr/share/fontconfig/conf.avail/70-fonts-noto-cjk.conf \
+			./etc/fonts/conf.d/70-fonts-noto-cjk.conf \
+			./usr/share/doc/fonts-noto-cjk/copyright
+		install -d "$overlay/usr/bin"
+		# localechooser runs gtk-set-font on every language change.
+		pigz -dc "$initrd/debian-initrd.gz" | cpio -i --quiet --to-stdout usr/bin/gtk-set-font \
+			| sed 's/^[[:space:]]*FONT_NAME="AR PL ShanHeiSun Uni"/\
+	case "$language" in\
+	    zh_TW*) FONT_NAME="Noto Sans CJK TC" ;;\
+	    zh_HK*|zh_MO*) FONT_NAME="Noto Sans CJK HK" ;;\
+	    *) FONT_NAME="Noto Sans CJK SC" ;;\
+	esac\
+	FONT_SIZE=$((FONT_SIZE + 1))/' > "$overlay/usr/bin/gtk-set-font"
+		grep -Fq 'FONT_NAME="Noto Sans CJK SC"' "$overlay/usr/bin/gtk-set-font"
+		chmod 0755 "$overlay/usr/bin/gtk-set-font"
+		(
+			cd "$overlay"
+			{ find etc usr/lib/triheart usr/share -print0; printf '%s\0' usr/bin/gtk-set-font usr/lib/debian-installer.d/S59triheart-bootstrap; } \
+				| cpio --null --quiet -o -H newc --owner=0:0
+		) | pigz -n > "$initrd/triheart-overlay.cpio.gz"
+		cat "$initrd/debian-initrd.gz" "$initrd/triheart-overlay.cpio.gz" > "$initrd/initrd.gz"
+		if [[ $architecture == arm64 ]]; then
+			xorriso -osirrox on -indev "$sources/debian-mini.iso" -extract /boot/grub/grub.cfg "$initrd/debian-grub.cfg"
+			{
+				printf "set default='TriHeart Installer (ARM64)'\nset timeout=5\n"
+				sed "s/^menuentry 'Graphical install' {/menuentry 'TriHeart Installer (ARM64)' {/" "$initrd/debian-grub.cfg"
+			} > "$initrd/grub.cfg"
+		fi
+		;;
+	04-iso)
+		cd "$build"
+		files=(03-initrd/initrd.gz)
+		paths=(/initrd.gz)
+		if [[ $architecture == arm64 ]]; then
+			files+=(03-initrd/initrd.gz 03-initrd/grub.cfg)
+			paths+=(/gtk/initrd.gz /boot/grub/grub.cfg)
+		fi
+		command=(xorriso -indev 01-sources/debian-mini.iso -outdev "04-iso/$iso_name" -boot_image any replay)
+		for index in "${!files[@]}"; do
+			command+=(-map "${files[index]}" "${paths[index]}")
+		done
+		{ printf '%q ' "${command[@]}"; printf '\n'; } > "$iso/xorriso-command.txt"
+		"${command[@]}"
+		xorriso -indev "$iso/$iso_name" -report_el_torito plain -report_system_area plain > "$iso/boot-report.txt" 2>&1
+		grep -q 'El Torito boot img' "$iso/boot-report.txt"
+		if [[ $architecture == arm64 ]]; then
+			grep -Eq 'El Torito boot img.*UEFI' "$iso/boot-report.txt"
+		fi
+		printf 'iso_path\tinput_file\tsha256\n' > "$iso/verified-files.tsv"
+		for index in "${!files[@]}"; do
+			xorriso -osirrox on -indev "$iso/$iso_name" -extract "${paths[index]}" "$work/$index"
+			cmp "${files[index]}" "$work/$index"
+			hash=$(sha256sum "${files[index]}")
+			printf '%s\t%s\t%s\n' "${paths[index]}" "${files[index]}" "${hash%% *}" >> "$iso/verified-files.tsv"
+		done
+		;;
+	*) printf 'Unknown ISO build stage %s\n' "$stage" >&2; exit 2 ;;
+esac

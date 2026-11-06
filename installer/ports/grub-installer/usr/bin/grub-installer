@@ -1,0 +1,106 @@
+#!/bin/sh
+set -e
+. /usr/share/debconf/confmodule
+
+root=$1
+[ "$root" = /target ]
+target_command=/usr/lib/triheart/bootstrap-arch
+
+fail_step() {
+	db_progress STOP || true
+	db_subst triheart/grub/failed REASON "$1"
+	db_input critical triheart/grub/failed || true
+	db_go || true
+	exit 1
+}
+
+if [ -d /sys/firmware/efi ]; then
+	esp=$(awk '$2 ~ /^\/target\/(boot\/efi|efi|boot)$/ && $3 == "vfat" {
+		if ($2 == "/target/boot/efi") { print $2; found = 1; exit }
+		if (!candidate) candidate = $2
+	} END { if (!found && candidate) print candidate }' /proc/mounts)
+	[ -n "$esp" ] || fail_step 'Mount an EFI System Partition in the partitioning step.'
+	esp=${esp#/target}
+	for state in /sys/firmware/efi/efivars/SecureBoot-*; do
+		[ -f "$state" ] || continue
+		if dd if="$state" bs=1 skip=4 count=1 2>/dev/null | grep -Fq "$(printf '\001')"; then
+			fail_step 'Disable Secure Boot in firmware to use the Arch GRUB packages.'
+		fi
+	done
+	case "$(uname -m)" in
+		x86_64) fallback=BOOTX64.EFI ;;
+		aarch64) fallback=BOOTAA64.EFI ;;
+		*) fail_step 'Unsupported UEFI architecture.' ;;
+	esac
+	# Match d-i's default: offer a fallback without overwriting an existing loader.
+	if [ ! -e "$root$esp/EFI/BOOT/$fallback" ]; then
+		db_fget grub-installer/force-efi-extra-removable seen
+		if [ "$RET" = false ]; then
+			db_set grub-installer/force-efi-extra-removable true
+		fi
+	fi
+	db_input low triheart/grub/update-nvram || [ "$?" -eq 30 ]
+	db_input low grub-installer/force-efi-extra-removable || [ "$?" -eq 30 ]
+	db_go || exit 10
+	db_get triheart/grub/update-nvram
+	nvram=$RET
+	db_get grub-installer/force-efi-extra-removable
+	removable=$RET
+	set -- efi "$esp" "$nvram" "$removable"
+else
+	[ "$(uname -m)" = x86_64 ] || fail_step 'Boot the ARM64 installer in UEFI mode.'
+	disks=$(list-devices disk)
+	choices=
+	for disk in $disks; do choices="${choices:+$choices, }$disk"; done
+	[ -n "$choices" ] || fail_step 'No boot disk was found.'
+	db_subst grub-installer/choose_bootdev DEVICES_LIST "$choices"
+	db_subst grub-installer/choose_bootdev DESCRIPTIONS "$choices"
+	db_input high grub-installer/choose_bootdev || [ "$?" -eq 30 ]
+	db_go || exit 10
+	db_get grub-installer/choose_bootdev
+	if [ "$RET" = manual ]; then
+		db_input critical grub-installer/bootdev || [ "$?" -eq 30 ]
+		db_go || exit 10
+		db_get grub-installer/bootdev
+	fi
+	disk=$(readlink -f "$RET")
+	printf '%s\n' "$disks" | grep -Fxq "$disk" || fail_step 'Select a whole disk for BIOS GRUB installation.'
+	set -- bios "$disk"
+fi
+
+db_progress START 0 1 grub-installer/progress/title
+db_progress INFO triheart/grub/install
+log-output -t triheart-grub "$target_command" /bin/bash -e -c '
+	mode=$1
+	destination=$2
+	packages=(grub)
+	if [[ $mode == efi ]]; then packages+=(efibootmgr); fi
+	pacman -Syu --noconfirm --needed "${packages[@]}"
+	mkinitcpio -P
+	if [[ $mode == efi ]]; then
+		case "$(uname -m)" in
+			x86_64) efi_target=x86_64-efi ;;
+			aarch64)
+				efi_target=arm64-efi
+				# Arch Linux ARM names the kernel Image and its initrd
+				# initramfs-linux.img. GRUB only auto-matches names.
+				if ! grep -q "^GRUB_EARLY_INITRD_LINUX_CUSTOM=" /etc/default/grub; then
+					echo "GRUB_EARLY_INITRD_LINUX_CUSTOM=initramfs-linux.img" >> /etc/default/grub
+				fi
+				;;
+			*) exit 1 ;;
+		esac
+		options=(--target="$efi_target" --efi-directory="$destination" --bootloader-id=TriHeart)
+		if [[ $3 == false ]]; then options+=(--no-nvram); fi
+		grub-install "${options[@]}"
+		if [[ $4 == true ]]; then grub-install "${options[@]}" --removable; fi
+	else
+		grub-install --target=i386-pc "$destination"
+	fi
+	grub-mkconfig -o /boot/grub/grub.cfg
+	if [[ ${efi_target:-} == arm64-efi ]]; then
+		grep -Eq "^[[:space:]]+initrd[[:space:]].*/initramfs-linux.img" /boot/grub/grub.cfg
+	fi
+' grub "$@" || fail_step 'Arch GRUB installation failed. See /var/log/syslog for details.'
+db_progress STEP 1
+db_progress STOP

@@ -1,0 +1,20 @@
+#!/bin/bash
+set -euo pipefail
+
+sources=$1
+arch_signer=$2
+cp /usr/share/keyrings/debian-archive-keyring.gpg "$sources/debian-archive-keyring.gpg"
+gpgv --status-fd 1 --keyring "$sources/debian-archive-keyring.gpg" \
+	--output "$sources/debian.Release" "$sources/debian.InRelease" > "$sources/debian-signature.status"
+grep -qx 'Codename: trixie' "$sources/debian.Release"
+
+gpg --batch --dearmor < "$sources/arch-release.asc" > "$sources/arch-release.gpg"
+for signature in "$sources"/*.sig; do
+	archive=${signature%.sig}
+	status="$archive.signature.status"
+	gpgv --status-fd 1 --keyring "$sources/arch-release.gpg" "$signature" "$archive" > "$status"
+	awk -v signer="$arch_signer" '
+		$1 == "[GNUPG:]" && $2 == "VALIDSIG" && ($3 == signer || $NF == signer) { valid = 1 }
+		END { exit !valid }
+	' "$status"
+done

@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+. /usr/share/debconf/confmodule
+. /usr/lib/base-installer/library.sh
+
+install_arch_base() {
+	if ! log-output -t triheart-bootstrap /usr/lib/triheart/bootstrap-arch; then
+		exit_error triheart-bootstrap/failed
+	fi
+}
+
+waypoint 1 check_target
+waypoint 100 install_arch_base
+run_waypoints triheart-bootstrap/progress

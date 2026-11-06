@@ -1,0 +1,49 @@
+#!/bin/bash
+set -euo pipefail
+
+project=$(cd -- "$(dirname -- "$0")/.." && pwd)
+work=$1 sources=$2 output=$3 architecture=$4
+
+while IFS=$'\t' read -r package archive_path hash; do
+	input="$sources/local/$archive_path"
+	printf '%s  %s\n' "$hash" "$input" | sha256sum --check -
+	stage="$work/port-$package"
+	dpkg-deb --raw-extract "$input" "$stage"
+	version=$(dpkg-deb --field "$input" Version)
+	sed -i "s/^Version:.*/Version: 2:${version#*:}+triheart1/" "$stage/DEBIAN/control"
+	if [[ -d $project/installer/ports/$package ]]; then
+		(cd "$project/installer/ports/$package" && tar --exclude=.DS_Store -cf - .) | tar -xf - -C "$stage"
+	fi
+	case $package in
+		choose-mirror)
+			if [[ $architecture == arm64 ]]; then
+				sed -i 's/Arch Linux/Arch Linux ARM/g' "$stage/DEBIAN/templates"
+			fi
+			;;
+		apt-setup-udeb) sed -i 's/apt-mirror-setup, //' "$stage/DEBIAN/control" ;;
+		download-installer) sed -i 's/net-retriever, anna/choose-mirror, configured-network, anna/' "$stage/DEBIAN/control" ;;
+		pkgsel)
+			compiler=gcc
+			if [[ $architecture != "$(dpkg --print-architecture)" ]]; then
+				case $architecture in
+					arm64) compiler=aarch64-linux-gnu-gcc ;;
+					amd64) compiler=x86_64-linux-gnu-gcc ;;
+				esac
+			fi
+			"$compiler" -O2 -Wall -Wextra -Werror "$project/installer/pty-output.c" -o "$stage/usr/lib/triheart/pty-output"
+			sed -i "s/^Architecture:.*/Architecture: $architecture/" "$stage/DEBIAN/control"
+			;;
+		grub-installer) sed -i 's/os-prober, //' "$stage/DEBIAN/control" ;;
+		finish-install)
+			rm "$stage/usr/lib/finish-install.d/10update-initramfs" \
+				"$stage/usr/lib/finish-install.d/50config-target-network" \
+				"$stage/usr/lib/finish-install.d/60cleanup"
+			;;
+	esac
+	if [[ -f $stage/DEBIAN/triheart.templates ]]; then
+		printf '\n' >> "$stage/DEBIAN/templates"
+		cat "$stage/DEBIAN/triheart.templates" >> "$stage/DEBIAN/templates"
+		rm "$stage/DEBIAN/triheart.templates"
+	fi
+	dpkg-deb --root-owner-group -Zgzip --build "$stage" "$output/$package.udeb"
+done < "$sources/selected.tsv"

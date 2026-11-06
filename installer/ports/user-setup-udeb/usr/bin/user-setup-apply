@@ -1,0 +1,56 @@
+#!/bin/sh
+set -e
+. /usr/share/debconf/confmodule
+
+root=$1
+[ "$root" = /target ]
+
+apply_password() {
+	account=$1 prefix=$2
+	db_get "passwd/$prefix-password-crypted" || RET=
+	if [ -n "$RET" ]; then
+		printf '%s:%s\n' "$account" "$RET" | chroot "$root" chpasswd -e
+	else
+		db_get "passwd/$prefix-password"
+		[ -n "$RET" ] || return 1
+		printf '%s:%s\n' "$account" "$RET" | chroot "$root" chpasswd
+	fi
+}
+
+db_get passwd/root-login
+root_login=$RET
+db_get passwd/make-user
+if [ "$RET" = true ]; then
+	db_get passwd/username
+	username=$RET
+	db_get passwd/user-fullname
+	fullname=$RET
+	if ! chroot "$root" id -u "$username" >/dev/null 2>&1; then
+		db_get passwd/user-uid || RET=
+		set --
+		if [ -n "$RET" ]; then set -- -u "$RET"; fi
+		# Arch's useradd needs /proc when copying the home directory skeleton
+		# under the installer kernel. The Arch chroot sets it up and cleans up.
+		/usr/lib/triheart/bootstrap-arch useradd -m -s /bin/bash -c "$fullname" "$@" -- "$username"
+	fi
+	apply_password "$username" user
+	if [ "$root_login" = false ]; then
+		chroot "$root" usermod -aG wheel -- "$username"
+		install -d -m 0750 "$root/etc/sudoers.d"
+		(umask 337; printf '%%wheel ALL=(ALL:ALL) ALL\n' > "$root/etc/sudoers.d/10-triheart-wheel")
+		chmod 0440 "$root/etc/sudoers.d/10-triheart-wheel"
+		chroot "$root" visudo -c -q
+	fi
+fi
+
+if [ "$root_login" = false ]; then
+	chroot "$root" passwd -l root
+else
+	apply_password root root
+fi
+
+for prefix in root user; do
+	for suffix in password password-again password-crypted; do
+		db_set "passwd/$prefix-$suffix" ''
+	done
+done

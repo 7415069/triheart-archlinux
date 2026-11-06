@@ -1,0 +1,22 @@
+Template: debian-installer/bootstrap-base/title
+Type: text
+Description: Install the Arch Linux base system
+Description-zh_CN.UTF-8: 安装 Arch Linux 基础系统
+
+Template: triheart-bootstrap/progress
+Type: text
+Description: Installing the Arch Linux base system
+Description-zh_CN.UTF-8: 正在安装 Arch Linux 基础系统
+
+Template: base-installer/section/install_arch_base
+Type: text
+Description: Downloading and installing signed Arch Linux packages…
+Description-zh_CN.UTF-8: 正在下载并安装经过签名验证的 Arch Linux 软件包……
+
+Template: triheart-bootstrap/failed
+Type: error
+Description: Arch Linux base installation failed
+ The Arch Linux packages could not be installed on the selected partitions.
+ See /var/log/syslog for details, then return to the installer menu to retry.
+Description-zh_CN.UTF-8: Arch Linux 基础系统安装失败
+ 无法将 Arch Linux 软件包安装到选定的分区。请查看 /var/log/syslog 中的详细信息，再返回安装菜单重试。

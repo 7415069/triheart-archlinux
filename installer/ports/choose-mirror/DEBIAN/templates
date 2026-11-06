@@ -1,0 +1,20 @@
+Template: debian-installer/choose-mirror/title
+Type: text
+Description: Choose an Arch Linux package mirror
+Description-zh_CN.UTF-8: 选择 Arch Linux 软件包镜像
+
+Template: triheart/mirror/region
+Type: select
+Choices: ${REGIONS}
+Description: Mirror country or region:
+ Select a location for the Arch Linux package mirror.
+Description-zh_CN.UTF-8: 镜像所在国家或地区：
+ 请选择 Arch Linux 软件包镜像所在的位置。
+
+Template: triheart/mirror
+Type: select
+Choices: ${MIRRORS}
+Description: Arch Linux package mirror:
+ Choose the preferred mirror for installing and updating the target system.
+Description-zh_CN.UTF-8: Arch Linux 软件包镜像：
+ 请选择安装和更新目标系统时优先使用的镜像。

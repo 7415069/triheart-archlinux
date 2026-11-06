@@ -1,0 +1,66 @@
+Template: debian-installer/pkgsel/title
+Type: text
+Description: Select and install software
+Description-zh_CN.UTF-8: 选择并安装软件
+
+Template: triheart/features
+Type: multiselect
+Choices-C: ssh, development
+Choices: SSH server, Development tools
+Choices-zh_CN.UTF-8: SSH 服务器, 开发工具
+Description: Additional software to install:
+ KDE Plasma, KDE Applications, Firefox, LibreOffice and desktop services are installed by default.
+ Development tools include OpenJDK 8 and 11.
+Description-zh_CN.UTF-8: 要安装的附加软件：
+ 默认安装 KDE Plasma、KDE 应用套件、Firefox、LibreOffice 和桌面服务。
+ 开发工具包含 OpenJDK 8 和 11。
+
+Template: triheart/pkgsel/install
+Type: text
+Description: Installing KDE Plasma and KDE Applications
+Description-zh_CN.UTF-8: 正在安装 KDE Plasma 和 KDE 应用套件
+
+Template: triheart/pkgsel/prepare
+Type: text
+Description: Synchronizing package databases and resolving dependencies
+Description-zh_CN.UTF-8: 正在同步软件源并解析依赖
+
+Template: triheart/pkgsel/download
+Type: text
+Description: Downloading packages ${DETAIL}
+Description-zh_CN.UTF-8: 正在下载软件包 ${DETAIL}
+
+Template: triheart/pkgsel/download-total
+Type: text
+Description: Packages downloaded ${DETAIL}
+Description-zh_CN.UTF-8: 已下载软件包 ${DETAIL}
+
+Template: triheart/pkgsel/download-finished
+Type: text
+Description: Download phase ended. Preparing package verification.
+Description-zh_CN.UTF-8: 下载阶段已结束，正在准备校验软件包
+
+Template: triheart/pkgsel/verify
+Type: text
+Description: Verifying packages and checking disk space ${DETAIL}
+Description-zh_CN.UTF-8: 正在校验软件包并检查磁盘空间 ${DETAIL}
+
+Template: triheart/pkgsel/apply
+Type: text
+Description: Installing packages ${DETAIL}
+Description-zh_CN.UTF-8: 正在安装软件包 ${DETAIL}
+
+Template: triheart/pkgsel/hooks
+Type: text
+Description: Running post-installation hooks ${DETAIL}
+Description-zh_CN.UTF-8: 正在执行安装后任务 ${DETAIL}
+
+Template: triheart/pkgsel/configure
+Type: text
+Description: Configuring the installed Arch Linux system
+Description-zh_CN.UTF-8: 正在配置已安装的 Arch Linux 系统
+
+Template: triheart/pkgsel/failed
+Type: error
+Description: Software installation or configuration failed
+ See /var/log/syslog for details and retry this step.

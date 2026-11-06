@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+project=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+output=${1:-"$project/dist"}
+architecture=${2:-amd64}
+case "$architecture" in amd64|arm64) ;; *) echo "Unsupported architecture: $architecture" >&2; exit 1 ;; esac
+mkdir -p "$output"
+stage=$(mktemp -d)
+trap 'rm -rf -- "$stage"' EXIT
+(cd "$project/installer/bootstrap-base" && tar --exclude=.DS_Store -cf - .) | tar -xf - -C "$stage"
+sed "s/^Architecture: .*/Architecture: $architecture/" "$stage/DEBIAN/control" > "$stage/control"
+mv "$stage/control" "$stage/DEBIAN/control"
+
+dpkg-deb --root-owner-group -Zgzip --build \
+	"$stage" "$output/bootstrap-base_0.1.0_$architecture.udeb"

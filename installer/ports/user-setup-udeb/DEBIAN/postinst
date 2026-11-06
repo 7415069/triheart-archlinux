@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+status=0
+user-setup-ask /target || status=$?
+case "$status" in
+	0) rm -f /run/triheart-users-applied ;;
+	30) exit 10 ;;
+	*) exit "$status" ;;
+esac

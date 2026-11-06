@@ -1,0 +1,11 @@
+Package: bootstrap-base
+Version: 1:0.1.0
+Section: debian-installer
+Priority: required
+Architecture: amd64
+Maintainer: TriHeart Linux
+Package-Type: udeb
+Depends: mounted-partitions, created-fstab, base-installer, di-utils
+Provides: kernel-installer, installed-base
+Installer-Menu-Item: 6500
+Description: Install the Arch Linux base system

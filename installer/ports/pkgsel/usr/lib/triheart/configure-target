@@ -1,0 +1,61 @@
+configure_target() {
+	ssh_service=$1
+	locale=$2
+	development=$3
+	root=/target
+
+	if [ "$locale" != C.UTF-8 ]; then
+		awk -v locale="$locale" '
+			{ candidate = $0; sub(/^#[[:space:]]*/, "", candidate); split(candidate, parts) }
+			parts[1] == locale { print candidate; next }
+			{ print }
+		' "$root/etc/locale.gen" > "$root/etc/locale.gen.new" || return 1
+		mv "$root/etc/locale.gen.new" "$root/etc/locale.gen" || return 1
+		log-output -t triheart-config chroot "$root" locale-gen || return 1
+	fi
+	printf 'LANG=%s\n' "$locale" > "$root/etc/locale.conf" || return 1
+	case "$locale" in
+		zh_*)
+			# The account created by finish-install inherits these defaults.
+			# KWin starts Fcitx itself in the Plasma Wayland session.
+			install -d "$root/etc/skel/.config/autostart" "$root/etc/environment.d" || return 1
+			log-output -t triheart-config chroot "$root" kwriteconfig6 \
+				--file /etc/skel/.config/kwinrc --group Wayland --key InputMethod --type path \
+				/usr/share/applications/org.fcitx.Fcitx5.desktop || return 1
+			printf '[Desktop Entry]\nHidden=true\n' \
+				> "$root/etc/skel/.config/autostart/org.fcitx.Fcitx5.desktop" || return 1
+			printf 'XMODIFIERS=@im=fcitx\n' > "$root/etc/environment.d/60-triheart-fcitx.conf" || return 1
+			;;
+	esac
+	if [ "$development" = true ]; then
+		log-output -t triheart-config chroot "$root" archlinux-java set java-11-openjdk || return 1
+	fi
+
+	db_get time/zone || RET=
+	zone=${RET:-UTC}
+	case "$zone" in /*|*..*) return 1 ;; esac
+	[ -f "$root/usr/share/zoneinfo/$zone" ] || return 1
+	ln -sfn "/usr/share/zoneinfo/$zone" "$root/etc/localtime" || return 1
+
+	keymap=$(awk -F'"' '/^XKBLAYOUT="[a-zA-Z0-9_-]+"$/ {print $2; exit}' /etc/default/keyboard 2>/dev/null || true)
+	if [ -n "$keymap" ]; then
+		# XKB layout names such as "cn" may have no Linux console equivalent.
+		if ! find "$root/usr/share/kbd/keymaps" -name "$keymap.map*" -print | grep -q .; then
+			keymap=us
+		fi
+		printf 'KEYMAP=%s\n' "$keymap" > "$root/etc/vconsole.conf" || return 1
+	fi
+
+	db_get netcfg/get_hostname || RET=
+	hostname=${RET:-archlinux}
+	printf '%s\n' "$hostname" > "$root/etc/hostname" || return 1
+	printf '127.0.0.1 localhost\n::1 localhost\n127.0.1.1 %s\n' "$hostname" > "$root/etc/hosts" || return 1
+	log-output -t triheart-config chroot "$root" systemctl enable NetworkManager.service cups.service bluetooth.service || return 1
+	log-output -t triheart-config chroot "$root" systemctl --global enable xdg-user-dirs.service || return 1
+	# A reused target can still have display-manager.service linked to SDDM.
+	log-output -t triheart-config chroot "$root" systemctl enable --force plasmalogin.service || return 1
+	log-output -t triheart-config chroot "$root" systemctl set-default graphical.target || return 1
+	if [ -n "$ssh_service" ]; then
+		log-output -t triheart-config chroot "$root" systemctl enable "$ssh_service" || return 1
+	fi
+}

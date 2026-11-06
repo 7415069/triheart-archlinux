@@ -1,0 +1,4 @@
+Template: triheart/user-setup/failed
+Type: error
+Description: User account configuration failed
+ Check /var/log/syslog, then return to the account setup step and retry.

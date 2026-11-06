@@ -1,0 +1,53 @@
+#!/bin/sh
+set -e
+. /usr/share/debconf/confmodule
+
+db_capb backup
+mirrorlist=/usr/lib/triheart/arch-mirrorlist
+regions=$(/bin/sh "$mirrorlist" --regions)
+db_subst triheart/mirror/region REGIONS "$regions"
+db_get triheart/mirror/region
+case ", $regions," in
+	*", $RET,"*) ;;
+	*) db_set triheart/mirror/region "${regions%%, *}" ;;
+esac
+
+while :; do
+	db_input high triheart/mirror/region || [ "$?" -eq 30 ]
+	db_go || exit 10
+	db_get triheart/mirror/region
+	choices=$(/bin/sh "$mirrorlist" --choices "$RET")
+	[ -n "$choices" ]
+	db_subst triheart/mirror MIRRORS "$choices"
+	db_get triheart/mirror
+	case ", $choices," in
+		*", $RET,"*) ;;
+		*)
+			db_set triheart/mirror "${choices%%, *}"
+			db_fset triheart/mirror seen false
+			;;
+	esac
+
+	while :; do
+		db_input high triheart/mirror || [ "$?" -eq 30 ]
+		if ! db_go; then
+			db_fset triheart/mirror/region seen false
+			break
+		fi
+		db_input high mirror/http/proxy || [ "$?" -eq 30 ]
+		if db_go; then break 2; fi
+		db_fset triheart/mirror seen false
+	done
+done
+
+db_get triheart/mirror
+/bin/sh "$mirrorlist" "$RET" > /run/triheart-mirrorlist.new
+mv /run/triheart-mirrorlist.new /run/triheart-mirrorlist
+
+db_get mirror/http/proxy
+case "$RET" in
+	''|*://*) proxy=$RET ;;
+	*) proxy="http://$RET" ;;
+esac
+(umask 077; printf '%s' "$proxy" > /run/triheart-proxy.new)
+mv /run/triheart-proxy.new /run/triheart-proxy

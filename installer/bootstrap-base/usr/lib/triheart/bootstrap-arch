@@ -1,0 +1,80 @@
+#!/bin/sh
+set -eu
+
+archive=/usr/lib/triheart/arch-bootstrap.tar.gz
+target=/target
+
+# The partitioner owns the selected disk, mounts and fstab.
+if ! grep -Eq ' /target/? ' /proc/mounts || [ ! -s "$target/etc/fstab" ]; then
+	echo "partman has not mounted /target or written its fstab" >&2
+	exit 1
+fi
+
+machine=$(uname -m)
+case "$machine" in
+	x86_64) keyring=archlinux; kernel=linux ;;
+	aarch64) keyring=archlinuxarm; kernel=linux-aarch64 ;;
+	*) echo "Unsupported Arch Linux architecture: $machine" >&2; exit 1 ;;
+esac
+work=$(mktemp -d /tmp/triheart-bootstrap.XXXXXX)
+runtime=$work/root.$machine
+mounts=
+cleanup() {
+	status=$?
+	trap - EXIT
+	for path in $mounts; do
+		if ! umount -l "$path"; then
+			status=1
+		fi
+	done
+	if grep -Fq " $work/" /proc/self/mountinfo; then
+		echo "Leaving $work in place because it still has mounts" >&2
+		status=1
+	else
+		rm -rf "$work"
+	fi
+	exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+bind_tree() {
+	mount --rbind "$1" "$2"
+	mounts="$2 $mounts"
+	mount --make-rprivate "$2"
+}
+
+tar -xzf "$archive" -C "$work"
+mkdir -p "$runtime/mnt"
+# arch-install-scripts mounts a tmpfs at dev/shm on the shared devtmpfs.
+mkdir -p /dev/shm
+bind_tree "$target" "$runtime/mnt"
+for path in dev proc sys; do
+	bind_tree "/$path" "$runtime/$path"
+done
+
+rm -f "$runtime/etc/resolv.conf"
+cp /etc/resolv.conf "$runtime/etc/resolv.conf"
+/bin/sh /usr/lib/triheart/arch-mirrorlist > "$runtime/etc/pacman.d/mirrorlist"
+if [ -s /run/triheart-proxy ]; then
+	http_proxy=$(cat /run/triheart-proxy)
+	https_proxy=$http_proxy
+	export http_proxy https_proxy
+fi
+
+if [ "$#" -gt 0 ]; then
+	chroot "$runtime" /usr/bin/arch-chroot /mnt "$@"
+	exit
+fi
+
+chroot "$runtime" /bin/bash -e -c '
+	stop_key_agents() {
+		gpgconf --homedir /mnt/etc/pacman.d/gnupg --kill all || true
+		gpgconf --kill all || true
+	}
+	trap stop_key_agents EXIT
+	pacman-key --init
+	pacman-key --populate "$1"
+	pacstrap -K /mnt base "$2" "$1-keyring"
+' bootstrap "$keyring" "$kernel"

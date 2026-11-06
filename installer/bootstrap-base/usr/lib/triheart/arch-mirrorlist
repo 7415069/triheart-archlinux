@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -eq 0 ] && [ -s /run/triheart-mirrorlist ]; then
+	cat /run/triheart-mirrorlist
+	exit
+fi
+
+catalog=/usr/lib/triheart/mirrors.tsv
+case "${1:-}" in
+	--regions)
+		awk -F '\t' '!seen[$1]++ { printf "%s%s", sep, $1; sep = ", " }' "$catalog"
+		exit
+		;;
+	--choices)
+		awk -F '\t' -v region="$2" '$1 == region { printf "%s%s", sep, $2; sep = ", " }' "$catalog"
+		exit
+		;;
+esac
+
+case "$(uname -m)" in
+	x86_64) suffix='/$repo/os/$arch' ;;
+	aarch64) suffix='/$arch/$repo' ;;
+	*) echo "Unsupported Arch Linux architecture" >&2; exit 1 ;;
+esac
+
+awk -F '\t' -v preferred="${1:-}" -v suffix="$suffix" '
+	NR <= 2 { fallback[NR] = $2 }
+	$2 == preferred { selected = $2 }
+	END {
+		if (!fallback[1]) exit 1
+		if (selected) print "Server = " selected suffix
+		for (i = 1; i <= 2; i++)
+			if (fallback[i] && fallback[i] != selected) print "Server = " fallback[i] suffix
+	}
+' "$catalog"
