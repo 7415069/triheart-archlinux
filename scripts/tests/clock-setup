@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Check Arch clock configuration with a verified upstream finish hook.
+
+Usage: clock-setup <upstream-10clock-setup> [configure-target-source]
+The caller supplies the hook extracted from its authenticated d-i package.
+All files live in temporary targets; clock and service commands are mocked.
+"""
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+project = Path(__file__).resolve().parents[2]
+upstream = Path(sys.argv[1]).read_text()
+config_path = Path(sys.argv[2]) if len(sys.argv) > 2 else (
+    project / "installer/ports/pkgsel/usr/lib/triheart/configure-target")
+config = config_path.read_text()
+assert config.count("\troot=/target\n") == 1
+assert upstream.count(". /usr/share/debconf/confmodule\n") == 1
+# Redirect paths and the debconf transport only; execute the real configuration
+# function and the upstream Windows detection / adjtime update logic.
+config = config.replace("\troot=/target\n", "\troot=$CLOCK_TEST_TARGET\n")
+upstream = upstream.replace("/target", "${CLOCK_TEST_TARGET}").replace(
+    ". /usr/share/debconf/confmodule\n", '. "$CLOCK_TEST_STUBS"\n')
+stubs = r'''
+db_get() {
+    case "$1" in
+        time/zone) RET=Asia/Shanghai ;;
+        netcfg/get_hostname) RET=clock-test ;;
+        clock-setup/ntp) RET=$CLOCK_TEST_NTP ;;
+        clock-setup/utc) RET=${CLOCK_NATIVE_UTC:-true} ;;
+        clock-setup/system-time-changed) RET=false ;;
+        *) return 1 ;;
+    esac
+}
+db_fget() { RET=false; }
+db_set() { CLOCK_NATIVE_UTC=$2; }
+db_input() { :; }
+db_go() { :; }
+anna-install() { :; }
+os-prober() { printf '%s\n' "$CLOCK_TEST_OS"; }
+udpkg() {
+    case "$1" in
+        --print-architecture) printf 'amd64\n' ;;
+        --print-os) printf 'linux\n' ;;
+        *) return 1 ;;
+    esac
+}
+logger() { :; }
+log-output() { printf '%s\n' "$*" >> "$CLOCK_TEST_LOG"; }
+'''
+
+def check(name, windows, ntp, initial=None):
+    with tempfile.TemporaryDirectory(prefix="triheart-clock-test.") as directory:
+        work = Path(directory)
+        target = work / "target"
+        (target / "etc").mkdir(parents=True)
+        zones = target / "usr/share/zoneinfo/Asia"
+        zones.mkdir(parents=True)
+        (zones / "Shanghai").write_text("test zone")
+        adjtime = target / "etc/adjtime"
+        if initial is not None:
+            adjtime.write_text(initial)
+        config_file = work / "configure-target"
+        config_file.write_text(config)
+        finish_file = work / "10clock-setup"
+        finish_file.write_text(upstream)
+        stub_file = work / "stubs"
+        stub_file.write_text(stubs)
+        log = work / "commands.log"
+        log.touch()
+        environment = dict(os.environ, CLOCK_TEST_TARGET=str(target),
+                           CLOCK_TEST_STUBS=str(stub_file), CLOCK_TEST_LOG=str(log),
+                           CLOCK_TEST_NTP="true" if ntp else "false",
+                           CLOCK_TEST_OS="/dev/sda2:Windows 11:Windows:chain" if windows else "")
+        subprocess.run(["bash", "-e", "-c",
+                        '. "$CLOCK_TEST_STUBS"; . "$1"; '
+                        'configure_target "" C.UTF-8 false false', "test", str(config_file)],
+                       env=environment, check=True, capture_output=True, text=True)
+        assert adjtime.is_file(), f"{name}: target RTC configuration missing"
+        before_finish = adjtime.read_text()
+        if initial is not None:
+            assert before_finish == initial, f"{name}: existing RTC settings overwritten"
+        subprocess.run(["bash", "-e", str(finish_file)], env=environment,
+                       check=True, capture_output=True, text=True)
+        lines = adjtime.read_text().splitlines()
+        assert lines[2] == ("LOCAL" if windows else "UTC"), (name, lines)
+        assert lines[:2] == before_finish.splitlines()[:2], (name, lines)
+        assert os.readlink(target / "etc/localtime") == "/usr/share/zoneinfo/Asia/Shanghai"
+        calls = log.read_text()
+        assert ("systemctl enable systemd-timesyncd.service" in calls) == ntp, (name, calls)
+        assert "hwclock" not in calls, f"{name}: unexpected hardware clock write"
+        print(f"PASS {name}")
+
+check("fresh Windows dual boot, native LOCAL decision", windows=True, ntp=False)
+check("fresh single OS, native UTC decision and NTP enabled", windows=False, ntp=True)
+check("existing LOCAL clock preserved, NTP enabled", windows=True, ntp=True,
+      initial="1.25 123456 0.0\n123456\nLOCAL\n")
+check("native LOCAL decision updates existing UTC", windows=True, ntp=False,
+      initial="1.25 123456 0.0\n123456\nUTC\n")
+check("native UTC decision updates existing LOCAL", windows=False, ntp=False,
+      initial="1.25 123456 0.0\n123456\nLOCAL\n")

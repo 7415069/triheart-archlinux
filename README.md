@@ -1,4 +1,4 @@
-# TriHeart Linux
+# TriHeart Archlinux
 
 ![TriHeart Archlinux 图形安装器横幅](installer/branding/banner.png)
 
@@ -11,7 +11,7 @@
 ```sh
 git clone https://github.com/7415069/triheart-archlinux.git
 cd triheart-archlinux
-./scripts/build-iso --help
+./scripts/build-iso amd64
 ```
 
 | 虚拟机或目标平台 | 构建命令 | 默认输出 | 目标系统仓库 |
@@ -79,7 +79,31 @@ cd triheart-archlinux
 4. 在镜像选择页选定 Arch 镜像，然后在软件选择页按需勾选 **SSH 服务器** 或 **开发工具**。KDE Plasma 和 KDE 应用套件默认安装。
 5. 安装完成后弹出 ISO，从目标磁盘启动并登录 Plasma。
 
-EFI 安装名称和 GRUB 菜单发行版名称均为 `TriHeart Archlinux`。选择更新 EFI 启动项时，安装器核对当前 ESP 的 GPT 标识与引导文件路径，启用对应启动项并将其放到启动顺序首位，保留其他系统的启动项；固件拒绝或未保留启动顺序时报告失败。旧 Debian 引导项仍存在时，不能仅凭引导文件安装成功就认定固件会启动新系统。ISO 的 GRUB 菜单主题和底层终端均不加载背景品牌横幅，避免选择安装后切换到内核时残留图片；保留原生菜单顺序、布局和操作，图形向导横幅不变。最终介质检查同时覆盖这两处背景设置。
+### 启动菜单与 EFI
+
+菜单顺序与 Debian 13 对应架构保持一致：amd64 的 **Graphical install** 在第一项，ARM64 在第二项。ISO 的 GRUB 菜单主题和底层终端均清除背景品牌横幅，避免选择安装后切换到内核时残留图片；原生菜单布局、操作、分辨率和内核参数保持不变。图形向导继续使用 TriHeart 横幅和中文字体。最终介质检查同时覆盖 GRUB 的主题背景和终端背景。
+
+EFI 安装名称和 GRUB 菜单发行版名称均为 `TriHeart Archlinux`。目标 ESP 由用户通过原生分区界面选择，适配组件识别并排除 Ventoy 安装介质的 EFI 分区。选择更新 EFI 启动项时，安装器核对当前 ESP 的 GPT 标识与引导文件路径，必要时补登记当前 ESP，启用对应启动项并将其放到启动顺序首位，保留其他系统的启动项。固件拒绝或未保留启动顺序时报告失败；关闭 NVRAM 更新时保留用户的选择。
+
+若默认启动进入旧 Debian 的 GRUB 命令行，但在固件启动菜单中选择 `TriHeart` 或 `TriHeart Archlinux` 可以进入新系统，应先调整固件的默认启动顺序。历史安装留下的启动项可能仍指向旧 Debian 配置；可以在固件中禁用旧启动项，并把新系统设为首项。
+
+### 时区与自动校时
+
+时区沿用原生 `time/zone`。在 Arch 新系统中补建缺失的 `/etc/adjtime`，让未修改的 `clock-setup` 收尾脚本保存其 UTC／本地时间决定；已有硬件时钟配置先予以保留。安装时选择 NTP 校时，则为目标系统启用 `systemd-timesyncd`，在安装后联网时持续同步。
+
+已安装的系统若时区正确而时间仍有偏差，可先查看状态：
+
+```sh
+timedatectl
+```
+
+当 `NTP service` 为 `inactive`、`System clock synchronized` 为 `no` 时，在联网后启用自动校时：
+
+```sh
+sudo timedatectl set-ntp true
+```
+
+相差八小时本身不足以判断硬件时钟的 UTC／本地时间模式错误，应结合 `RTC in local TZ` 和实际时钟状态判断。
 
 ### 安装介质与联网要求
 
@@ -101,27 +125,48 @@ d-i 继续负责图形前端、步骤调度、硬件探测、网络、分区和�
 
 具备 `dpkg-deb` 和对应架构 GCC 的 Linux 构建环境可以运行 `./scripts/build-component`，单独生成 `dist/bootstrap-base_0.1.0_amd64.udeb`。
 
-## 虚拟机验收记录
+## 验证与验收记录
 
-本次迁移使用新的 debian-cd 构建链。构建检查包括 BIOS/UEFI 结构、上游内核与图形 initrd 原始文件一致性、udeb 文件校验、驱动 ABI、适配包入盘和介质校验和。构建通过不代表已完成虚拟机安装、目标系统重启或实体 T430 / Ventoy 验收；这些需逐项对照验证。
+构建检查、安装介质启动和目标系统重启分别记录。`scripts/build-iso` 检查 BIOS/UEFI 结构、上游内核与图形 initrd 原始文件一致性、udeb 文件校验、驱动 ABI、适配包入盘、中文实际排版、GRUB 背景及介质校验和。
 
-2026-11-07：amd64 和 arm64 均已通过新构建入口的完整构建、内容校验和自动清理。QEMU 中原生 netinst 对照已通过 BIOS 图形启动；新的 amd64 镜像已通过 UEFI 图形启动、原生 `anna` 从 ISO 加载全部九个适配包及 DHCP 获取地址，停在主机名设置页。ARM64 字体修正镜像已在无硬盘的 VirtualBox 临时虚拟机中通过 UEFI 图形启动和简体中文显示验收，确认前端加载 Noto 常规与粗体，保留原生 `DejaVu Sans 9` 设置；本次字体修改未重新执行完整安装重启。字体回归、现场诊断和截图位于 `dist/validation/font-fix-20261107/`。
+### 2026-11-07 本轮验证
 
-下表记录此前版本的完整安装验收范围。
+| 范围 | 结果 |
+| --- | --- |
+| amd64、arm64 完整构建 | 均通过 `scripts/build-iso` 完成构建与最终介质校验，成功发布后自动清理中间产物；保留记录的校验和通过复核。 |
+| amd64 安装介质 | QEMU 中原生 netinst 对照通过 BIOS 图形启动；TriHeart 镜像通过 UEFI 图形启动、原生 `anna` 从 ISO 加载全部九个适配包及 DHCP 获取地址。 |
+| GRUB 过渡画面 | QEMU UEFI 中复现旧镜像退出菜单时的 logo 残影；修正镜像的连续过渡帧中残影消失，并成功进入 GTK 语言选择页。生成的 GRUB 配置仅有两处背景加载命令变化。 |
+| ARM64 图形安装器 | 无硬盘的 VirtualBox 临时虚拟机通过 UEFI 图形启动和简体中文显示验收；前端加载 Noto 常规与粗体，保留原生 `DejaVu Sans 9` 设置。 |
+| 已安装 ARM64 系统 | 修复重分区后旧 EFI 条目仍引用原 ESP GUID 的问题，原虚拟机成功进入 Plasma 登录界面；重复核对没有新增条目。 |
+| EFI 组件回归 | 八项检查通过，覆盖旧 Debian 优先、停用条目、旧 GPT 标识、正确顺序的重复执行、关闭 NVRAM 更新，以及固件拒绝或忽略写入。 |
+| 时钟组件回归 | 使用验签 udeb 中的原生 `10clock-setup`，通过 Windows 双系统、UTC／本地时间切换、保留已有配置和 NTP 服务启用等五项检查；最终两种架构 ISO 中的脚本与测试输入一致。 |
+
+用户在 x86_64 真机上反馈：安装后选择 `TriHeart` 启动项可以进入新 Arch，默认进入旧 Debian 引导器的问题与历史启动项有关。另一次现场检查显示 RTC 已为本地时间，但 NTP 未启用、系统未同步；启用 NTP 后时间恢复正常。该记录没有将八小时偏差直接归因于 RTC 模式错误。
+
+最新的时钟配置修正已完成两种架构的构建与组件验证，尚未重新执行完整的虚拟机安装和目标系统重启。
+
+本地证据保存在 `dist/validation/` 的 `debian-cd-20261107/`、`boot-fix-20261107/`、`font-fix-20261107/`、`grub-fix-20261107/`、`boot-background-20261107/` 和 `clock-fix-20261107/`。每次构建的源码、验签与校验记录保存在 `dist/builds/`。`dist/` 为本地产物目录，Git 仓库保存构建源码、配置和文档。
+
+### 组件回归检查
+
+```sh
+./scripts/tests/clean-build
+./scripts/tests/grub-efi
+```
+
+时钟回归通过 `./scripts/tests/clock-setup /path/to/10clock-setup` 运行，参数为从本次已验证的 `clock-setup` udeb 中提取的原生收尾脚本。该检查使用临时目标目录并模拟服务命令，保留原生 Windows 检测与时钟配置逻辑。
+
+### 此前版本的完整安装验收
+
+下表记录此前版本的完整安装路径。
 
 | 平台 | 已验证的安装路径 |
 | --- | --- |
 | Apple Silicon 上的 VirtualBox，ARM64 UEFI | 使用引导式 ext4 分区完成联网安装，移除 ISO 后进入 Plasma Wayland。验证了简体中文输入、CUPS、PipeWire、Flathub 和中文用户目录。另行验证了复用 Btrfs 分区后重试安装、保留 SSH 选项启动，以及 UEFI 回退引导。 |
 | x86_64 UEFI 虚拟机 | 早期版本通过已签名软件包的测试缓存完成精简系统安装。验证了独立 ext4 `/home`、GRUB 启动、普通用户登录、DHCP 和 `pacman -Syu`。 |
 
-待端到端验收的路径包括 x86_64 空盘联网安装 KDE、传统 BIOS 引导，以及加密、LVM 和 RAID 分区方案。
+待补充的本地端到端验收包括 x86_64 空盘联网安装 KDE、传统 BIOS 目标系统引导，以及加密、LVM 和 RAID 分区方案。
 
 ## 许可证
 
 仓库根目录提供 [MIT 许可证](LICENSE)。ISO 内的 Debian、Arch Linux、Arch Linux ARM 及第三方组件适用各自的上游许可证。
-
-### 2026-11-07 启动修复与品牌配置
-
-ARM64 虚拟机重分区后，旧的 TriHeart UEFI 条目仍引用原 ESP 的分区 GUID。Arch GRUB 2.16 按相同加载器路径识别已登记条目，因而没有更新它。适配组件在 GRUB 安装后核对当前 GPT 分区 GUID 和加载器路径，必要时由官方 `efibootmgr` 补登记当前 ESP，保留其他启动项，并尊重用户关闭 NVRAM 更新的选择。修复已在原虚拟机验证，系统成功进入 Plasma 登录界面；重复登记校验没有新增条目。
-
-`debian-cd` 上游脚本保持不变并进行源码校验。品牌通过其发行名称、介质标签、背景图配置及独立 d-i 输入覆盖层实现。两个提供的 SVG 与项目的 `logo.svg` 内容相同，继续复用项目现有横幅和背景图。菜单顺序保持原生：amd64 的图形安装在第一项，ARM64 在第二项。

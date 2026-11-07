@@ -39,6 +39,15 @@ configure_target() {
 	case "$zone" in /*|*..*) return 1 ;; esac
 	[ -f "$root/usr/share/zoneinfo/$zone" ] || return 1
 	ln -sfn "/usr/share/zoneinfo/$zone" "$root/etc/localtime" || return 1
+	# Native clock-setup/10clock-setup updates UTC/LOCAL only if this file
+	# exists. Arch does not ship it; create it before that finish hook runs.
+	if [ ! -e "$root/etc/adjtime" ]; then
+		printf '0.0 0 0.0\n0\nUTC\n' > "$root/etc/adjtime" || return 1
+	fi
+	db_get clock-setup/ntp || RET=false
+	if [ "$RET" = true ]; then
+		log-output -t triheart-config chroot "$root" systemctl enable systemd-timesyncd.service || return 1
+	fi
 
 	keymap=$(awk -F'"' '/^XKBLAYOUT="[a-zA-Z0-9_-]+"$/ {print $2; exit}' /etc/default/keyboard 2>/dev/null || true)
 	if [ -n "$keymap" ]; then
