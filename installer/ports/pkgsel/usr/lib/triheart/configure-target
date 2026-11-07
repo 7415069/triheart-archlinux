@@ -2,6 +2,7 @@ configure_target() {
 	ssh_service=$1
 	locale=$2
 	development=$3
+	desktop=${4:-true}
 	root=/target
 
 	if [ "$locale" != C.UTF-8 ]; then
@@ -16,15 +17,17 @@ configure_target() {
 	printf 'LANG=%s\n' "$locale" > "$root/etc/locale.conf" || return 1
 	case "$locale" in
 		zh_*)
-			# The account created by finish-install inherits these defaults.
-			# KWin starts Fcitx itself in the Plasma Wayland session.
-			install -d "$root/etc/skel/.config/autostart" "$root/etc/environment.d" || return 1
-			log-output -t triheart-config chroot "$root" kwriteconfig6 \
-				--file /etc/skel/.config/kwinrc --group Wayland --key InputMethod --type path \
-				/usr/share/applications/org.fcitx.Fcitx5.desktop || return 1
-			printf '[Desktop Entry]\nHidden=true\n' \
-				> "$root/etc/skel/.config/autostart/org.fcitx.Fcitx5.desktop" || return 1
-			printf 'XMODIFIERS=@im=fcitx\n' > "$root/etc/environment.d/60-triheart-fcitx.conf" || return 1
+			if [ "$desktop" = true ]; then
+				# The account created by finish-install inherits these defaults.
+				# KWin starts Fcitx itself in the Plasma Wayland session.
+				install -d "$root/etc/skel/.config/autostart" "$root/etc/environment.d" || return 1
+				log-output -t triheart-config chroot "$root" kwriteconfig6 \
+					--file /etc/skel/.config/kwinrc --group Wayland --key InputMethod --type path \
+					/usr/share/applications/org.fcitx.Fcitx5.desktop || return 1
+				printf '[Desktop Entry]\nHidden=true\n' \
+					> "$root/etc/skel/.config/autostart/org.fcitx.Fcitx5.desktop" || return 1
+				printf 'XMODIFIERS=@im=fcitx\n' > "$root/etc/environment.d/60-triheart-fcitx.conf" || return 1
+			fi
 			;;
 	esac
 	if [ "$development" = true ]; then
@@ -50,11 +53,16 @@ configure_target() {
 	hostname=${RET:-archlinux}
 	printf '%s\n' "$hostname" > "$root/etc/hostname" || return 1
 	printf '127.0.0.1 localhost\n::1 localhost\n127.0.1.1 %s\n' "$hostname" > "$root/etc/hosts" || return 1
-	log-output -t triheart-config chroot "$root" systemctl enable NetworkManager.service cups.service bluetooth.service || return 1
-	log-output -t triheart-config chroot "$root" systemctl --global enable xdg-user-dirs.service || return 1
-	# A reused target can still have display-manager.service linked to SDDM.
-	log-output -t triheart-config chroot "$root" systemctl enable --force plasmalogin.service || return 1
-	log-output -t triheart-config chroot "$root" systemctl set-default graphical.target || return 1
+	log-output -t triheart-config chroot "$root" systemctl enable NetworkManager.service || return 1
+	if [ "$desktop" = true ]; then
+		log-output -t triheart-config chroot "$root" systemctl enable cups.service bluetooth.service || return 1
+		log-output -t triheart-config chroot "$root" systemctl --global enable xdg-user-dirs.service || return 1
+		# A reused target can still have display-manager.service linked to SDDM.
+		log-output -t triheart-config chroot "$root" systemctl enable --force plasmalogin.service || return 1
+		log-output -t triheart-config chroot "$root" systemctl set-default graphical.target || return 1
+	else
+		log-output -t triheart-config chroot "$root" systemctl set-default multi-user.target || return 1
+	fi
 	if [ -n "$ssh_service" ]; then
 		log-output -t triheart-config chroot "$root" systemctl enable "$ssh_service" || return 1
 	fi

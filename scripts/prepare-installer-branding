@@ -1,0 +1,36 @@
+#!/bin/bash
+# Prepare a separate d-i input tree; never modify the authenticated originals.
+# Append files using the same cpio extension mechanism as debian-cd LOGOPNG.
+set -euo pipefail
+architecture=$1 build=$2
+sources="$build/01-sources"
+record="$build/03-initrd"
+branding="$sources/project/installer/branding"
+output="$build/.work/di-brand/$architecture"
+work=$(mktemp -d)
+trap 'rm -rf -- "$work"' EXIT
+mkdir -p "$output"
+cp -al "$sources/di/$architecture/." "$output/"
+overlay="$work/overlay"
+install -d "$overlay/usr/share/graphics" "$overlay/etc/fonts/conf.d"
+for name in logo_debian.png logo_debian_dark.png; do
+	install -m 0644 "$branding/banner.png" "$overlay/usr/share/graphics/$name"
+done
+install -m 0644 "$branding/64-triheart-cjk.conf" "$overlay/etc/fonts/conf.d/64-triheart-cjk.conf"
+font_path=$(awk -F '\t' '$1 == "fonts-noto-cjk" {print $2}' "$sources/build-packages.tsv")
+[[ $font_path == pool/*.deb && $font_path != *..* ]] || exit 1
+dpkg-deb --fsys-tarfile "$sources/build-packages/$font_path" | tar -xf - -C "$overlay" \
+	./usr/share/fonts/opentype/noto/NotoSansCJK-{Regular,Bold}.ttc \
+	./usr/share/doc/fonts-noto-cjk/copyright
+(
+	cd "$overlay"
+	find . -type f -print0 | sort -z | xargs -0 sha256sum
+) > "$record/branding-files.sha256"
+initrd="$work/initrd"
+pigz -dc "$sources/di/$architecture/cdrom/gtk/initrd.gz" > "$initrd"
+(
+	cd "$overlay"
+	find . -print0 | cpio --null --quiet -oA -H newc --owner=0:0 -F "$initrd"
+)
+pigz -nc "$initrd" > "$output/cdrom/gtk/initrd.gz.new"
+mv "$output/cdrom/gtk/initrd.gz.new" "$output/cdrom/gtk/initrd.gz"

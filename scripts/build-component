@@ -9,8 +9,19 @@ mkdir -p "$output"
 stage=$(mktemp -d)
 trap 'rm -rf -- "$stage"' EXIT
 (cd "$project/installer/bootstrap-base" && tar --exclude=.DS_Store -cf - .) | tar -xf - -C "$stage"
+# Mirror selection owns this helper and its catalog.
+rm "$stage/usr/lib/triheart/arch-mirrorlist"
 sed "s/^Architecture: .*/Architecture: $architecture/" "$stage/DEBIAN/control" > "$stage/control"
 mv "$stage/control" "$stage/DEBIAN/control"
+
+compiler=gcc
+if [ "$architecture" != "$(dpkg --print-architecture)" ]; then
+	case "$architecture" in
+		arm64) compiler=aarch64-linux-gnu-gcc ;;
+		amd64) compiler=x86_64-linux-gnu-gcc ;;
+	esac
+fi
+"$compiler" -O2 -Wall -Wextra -Werror "$project/installer/pty-output.c" -o "$stage/usr/lib/triheart/pty-output"
 
 dpkg-deb --root-owner-group -Zgzip --build \
 	"$stage" "$output/bootstrap-base_0.1.0_$architecture.udeb"

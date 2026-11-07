@@ -8,6 +8,16 @@ target_command=/usr/lib/triheart/bootstrap-arch
 
 fail_step() {
 	db_progress STOP || true
+	logger -t grub-installer -- "$1" || true
+	# Keep the boot loader diagnostics when the machine is powered off
+	# before d-i reaches its normal save-logs step.
+	if grep -q ' /target ' /proc/mounts; then
+		(
+			umask 077
+			mkdir -p "$root/var/log/installer" &&
+				sed -n '/ grub-installer: /p' /var/log/syslog > "$root/var/log/installer/grub-installer.log"
+		) || true
+	fi
 	db_subst triheart/grub/failed REASON "$1"
 	db_input critical triheart/grub/failed || true
 	db_go || true
@@ -15,11 +25,18 @@ fail_step() {
 }
 
 if [ -d /sys/firmware/efi ]; then
+	. /lib/partman/lib/triheart-efi.sh
 	esp=$(awk '$2 ~ /^\/target\/(boot\/efi|efi|boot)$/ && $3 == "vfat" {
 		if ($2 == "/target/boot/efi") { print $2; found = 1; exit }
 		if (!candidate) candidate = $2
 	} END { if (!found && candidate) print candidate }' /proc/mounts)
 	[ -n "$esp" ] || fail_step 'Mount an EFI System Partition in the partitioning step.'
+	esp_device=$(awk -v path="$esp" '$2 == path { print $1; exit }' /proc/mounts)
+	if is_ventoy_efi "$esp_device"; then
+		db_subst triheart/grub/installation-media DEVICE "$esp_device"
+		db_metaget triheart/grub/installation-media description
+		fail_step "$RET"
+	fi
 	esp=${esp#/target}
 	for state in /sys/firmware/efi/efivars/SecureBoot-*; do
 		[ -f "$state" ] || continue
@@ -70,18 +87,45 @@ fi
 
 db_progress START 0 1 grub-installer/progress/title
 db_progress INFO triheart/grub/install
-log-output -t triheart-grub "$target_command" /bin/bash -e -c '
+failed_command=$(log-output --pass-stdout -t grub-installer "$target_command" /bin/bash -e -c '
+	# Reserve stdout for the failed command name. d-i logs the command output.
+	exec 4>&1 1>&2
+	step=pacman
+	report_failure() {
+		if (( $? != 0 )); then printf "%s\n" "$step" >&4; fi
+	}
+	trap report_failure EXIT
 	mode=$1
 	destination=$2
 	packages=(grub)
 	if [[ $mode == efi ]]; then packages+=(efibootmgr); fi
 	pacman -Syu --noconfirm --needed "${packages[@]}"
-	mkinitcpio -P
+	step=mkinitcpio
+	if compgen -G "/etc/mkinitcpio.d/*.preset" >/dev/null; then
+		mkinitcpio -P
+	else
+		# Replay the Arch kernel hook when a previous transaction left
+		# the packaged kernel in place without its boot files or preset.
+		shopt -s nullglob
+		kernels=(/usr/lib/modules/*/vmlinuz)
+		shopt -u nullglob
+		if (( ${#kernels[@]} == 0 )); then
+			echo "No packaged kernel image found in /usr/lib/modules."
+			exit 1
+		fi
+		printf "%s\n" "${kernels[@]#/}" | /usr/share/libalpm/scripts/mkinitcpio install
+		if ! compgen -G "/etc/mkinitcpio.d/*.preset" >/dev/null; then
+			echo "The mkinitcpio hook could not create a preset. Check the installed kernel package."
+			exit 1
+		fi
+	fi
+	step=grub-install
 	if [[ $mode == efi ]]; then
 		case "$(uname -m)" in
-			x86_64) efi_target=x86_64-efi ;;
+			x86_64) efi_target=x86_64-efi; efi_file=grubx64.efi ;;
 			aarch64)
 				efi_target=arm64-efi
+				efi_file=grubaa64.efi
 				# Arch Linux ARM names the kernel Image and its initrd
 				# initramfs-linux.img. GRUB only auto-matches names.
 				if ! grep -q "^GRUB_EARLY_INITRD_LINUX_CUSTOM=" /etc/default/grub; then
@@ -90,17 +134,76 @@ log-output -t triheart-grub "$target_command" /bin/bash -e -c '
 				;;
 			*) exit 1 ;;
 		esac
-		options=(--target="$efi_target" --efi-directory="$destination" --bootloader-id=TriHeart)
+		bootloader_id="TriHeart Archlinux"
+		options=(--target="$efi_target" --efi-directory="$destination" --bootloader-id="$bootloader_id")
 		if [[ $3 == false ]]; then options+=(--no-nvram); fi
 		grub-install "${options[@]}"
-		if [[ $4 == true ]]; then grub-install "${options[@]}" --removable; fi
+		# GRUB may match an old entry by loader path alone after GPT repartitioning.
+		# Let efibootmgr add the current ESP without deleting any existing entry.
+		if [[ $3 != false ]]; then
+			step=efibootmgr
+			efi_device=$(findmnt -n -o SOURCE -T "$destination")
+			efi_partition=$(blkid -p -s PART_ENTRY_NUMBER -o value "$efi_device")
+			efi_uuid=$(blkid -p -s PART_ENTRY_UUID -o value "$efi_device")
+			efi_scheme=$(blkid -p -s PART_ENTRY_SCHEME -o value "$efi_device")
+			efi_disk=$(lsblk -ndpo PKNAME "$efi_device")
+			[[ -n $efi_disk && $efi_partition =~ ^[0-9]+$ && -n $efi_uuid ]]
+			efi_loader="\\EFI\\$bootloader_id\\$efi_file"
+			if [[ $efi_scheme == gpt ]]; then
+				current_efi_entry() {
+					efibootmgr -v | grep -iF "$efi_uuid" | grep -iF "$efi_loader" |
+						sed -n "s/^Boot\([[:xdigit:]]\{4\}\)[*[:space:]].*/\1/p" | head -n 1
+				}
+				boot_entry=$(current_efi_entry)
+				if [[ -z $boot_entry ]]; then
+					efibootmgr --create --disk "$efi_disk" --part "$efi_partition" \
+						--label "$bootloader_id" --loader "$efi_loader"
+					boot_entry=$(current_efi_entry)
+				fi
+				[[ $boot_entry =~ ^[[:xdigit:]]{4}$ ]]
+				# A valid loader can already exist behind an obsolete Debian entry.
+				# Updating NVRAM must also make this installation the default.
+				boot_order=$(efibootmgr | sed -n "s/^BootOrder: //p")
+				if [[ ${boot_order%%,*} != "$boot_entry" ]]; then
+					other_entries=$(printf "%s\n" "$boot_order" | tr , "\n" |
+						grep -ivx "$boot_entry" | paste -sd , -)
+					efibootmgr --bootorder "$boot_entry${other_entries:+,$other_entries}"
+				fi
+				efibootmgr --bootnum "$boot_entry" --active
+				boot_order=$(efibootmgr | sed -n "s/^BootOrder: //p")
+				if [[ ${boot_order%%,*} != "$boot_entry" ]]; then
+					echo "Firmware did not retain the requested EFI boot order."
+					exit 1
+				fi
+			fi
+		fi
+		if [[ $4 == true ]]; then
+			step="grub-install --removable"
+			grub-install "${options[@]}" --removable
+		fi
+		# Preserve the actual firmware paths and boot order in the d-i log.
+		efibootmgr -v || true
 	else
 		grub-install --target=i386-pc "$destination"
+	fi
+	step=grub-mkconfig
+	sed -i "s/^GRUB_DISTRIBUTOR=.*/GRUB_DISTRIBUTOR=\"TriHeart Archlinux\"/" /etc/default/grub
+	# Keep device and diagnostic shortcuts in the firmware boot menu.
+	if [[ $mode == efi ]] && ! grep -q "^GRUB_DISABLE_BOOTNEXT=" /etc/default/grub; then
+		printf "\nGRUB_DISABLE_BOOTNEXT=true\n" >> /etc/default/grub
 	fi
 	grub-mkconfig -o /boot/grub/grub.cfg
 	if [[ ${efi_target:-} == arm64-efi ]]; then
 		grep -Eq "^[[:space:]]+initrd[[:space:]].*/initramfs-linux.img" /boot/grub/grub.cfg
 	fi
-' grub "$@" || fail_step 'Arch GRUB installation failed. See /var/log/syslog for details.'
+' grub "$@") || {
+	failed_command=$(printf '%s\n' "$failed_command" | tail -n 1)
+	case "$failed_command" in
+	pacman|mkinitcpio|grub-install|efibootmgr|'grub-install --removable'|grub-mkconfig)
+			fail_step "$failed_command"
+			;;
+		*) fail_step 'Arch chroot' ;;
+	esac
+}
 db_progress STEP 1
 db_progress STOP

@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Exercise the installer NVRAM block against firmware-entry scenarios."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
+project = Path(__file__).resolve().parents[2]
+source = (project / "installer/ports/grub-installer/usr/bin/grub-installer").read_text()
+start = source.index('\t\tif [[ $3 != false ]]; then')
+end = source.index('\n\t\tif [[ $4 == true ]]; then', start)
+code = source[start:end]
+current_uuid = "5d385ee9-a132-4815-be81-1f296ac3f1eb"
+loader = r"\EFI\TriHeart Archlinux\grubx64.efi"
+
+fake_tool = r'''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+tool, args = Path(sys.argv[0]).name, sys.argv[1:]
+path = Path(os.environ["EFI_TEST_STATE"])
+state = json.loads(path.read_text())
+if tool == "findmnt":
+    print("/dev/vda1")
+elif tool == "blkid":
+    print({"PART_ENTRY_NUMBER": "1", "PART_ENTRY_UUID": state["uuid"],
+           "PART_ENTRY_SCHEME": "gpt"}[args[args.index("-s") + 1]])
+elif tool == "lsblk":
+    print("/dev/vda")
+elif tool == "efibootmgr":
+    if args and args != ["-v"]:
+        state["writes"].append(args)
+        if args[0] == state.get("fail"):
+            sys.exit(1)
+        if args[0] == "--create" and not state.get("ignore_create"):
+            number = f'{max(int(e, 16) for e in state["entries"]) + 1:04X}'
+            state["entries"][number] = {
+                "uuid": state["uuid"], "loader": args[args.index("--loader") + 1],
+                "label": args[args.index("--label") + 1], "active": True}
+            state["order"].insert(0, number)
+        elif args[0] == "--bootorder" and not state.get("ignore_order"):
+            state["order"] = args[1].split(",")
+        elif args[0] == "--bootnum":
+            state["entries"][args[1]]["active"] = True
+        path.write_text(json.dumps(state))
+    print("BootOrder: " + ",".join(state["order"]))
+    for number, entry in state["entries"].items():
+        active = "*" if entry.get("active", True) else " "
+        print(f'Boot{number}{active} {entry["label"]} HD(1,GPT,{entry["uuid"]},0x800,0x10000)/File({entry["loader"]})')
+'''
+
+def entry(label, path, uuid=current_uuid, active=True):
+    return {"label": label, "loader": path, "uuid": uuid, "active": active}
+
+def run(name, entries, order, nvram=True, **changes):
+    with tempfile.TemporaryDirectory(prefix="triheart-efi-test.") as directory:
+        work = Path(directory)
+        stub = work / "tool"
+        stub.write_text(fake_tool)
+        stub.chmod(0o755)
+        for tool in ("findmnt", "blkid", "lsblk", "efibootmgr"):
+            (work / tool).symlink_to(stub)
+        state_path = work / "state.json"
+        state_path.write_text(json.dumps(dict(
+            uuid=current_uuid, entries=entries, order=order, writes=[], **changes)))
+        environment = dict(os.environ, PATH=f'{work}:{os.environ["PATH"]}',
+                           EFI_TEST_STATE=str(state_path), destination="/boot/efi",
+                           bootloader_id="TriHeart Archlinux", efi_file="grubx64.efi")
+        result = subprocess.run(["bash", "-e", "-c", code, "grub", "efi", "/boot/efi",
+                                 "true" if nvram else "false", "false"],
+                                env=environment, capture_output=True, text=True)
+        state = json.loads(state_path.read_text())
+        expected_failure = bool(changes)
+        assert (result.returncode != 0) == expected_failure, (name, result.stderr, result.stdout)
+        if not nvram:
+            assert not state["writes"] and state["order"] == order
+        elif not expected_failure:
+            chosen = state["entries"][state["order"][0]]
+            assert chosen == entry("TriHeart Archlinux", loader)
+            # Existing loaders and their relative order must be preserved.
+            assert all(number in state["entries"] for number in entries)
+            assert [number for number in state["order"] if number != state["order"][0]] == [
+                number for number in order if number != state["order"][0]]
+        print(f"PASS {name}")
+        return state
+
+debian = entry("debian", r"\EFI\debian\grubx64.efi")
+windows = entry("Windows Boot Manager", r"\EFI\Microsoft\Boot\bootmgfw.efi")
+existing = {"0001": debian, "0000": windows,
+            "0007": entry("TriHeart Archlinux", loader, active=False)}
+state = run("old Debian first, current loader inactive", existing, ["0001", "0007", "0000"])
+assert not any(args[0] == "--create" for args in state["writes"])
+state = run("current loader already first", state["entries"], state["order"])
+assert not any(args[0] in ("--create", "--bootorder") for args in state["writes"])
+stale = dict(existing, **{"0007": entry("TriHeart Archlinux", loader,
+                                      uuid="14067bc6-0ca1-4ba0-8b1f-e591c7713607")})
+state = run("stale GPT entry for same loader", stale, ["0001", "0007", "0000"])
+assert sum(args[0] == "--create" for args in state["writes"]) == 1
+run("NVRAM updates disabled", existing, ["0001", "0007", "0000"], nvram=False)
+run("firmware refuses boot order", existing, ["0001", "0007", "0000"], fail="--bootorder")
+run("firmware refuses entry creation", stale, ["0001", "0007", "0000"], fail="--create")
+run("firmware ignores entry creation", stale, ["0001", "0007", "0000"], ignore_create=True)
+run("firmware ignores boot order", existing, ["0001", "0007", "0000"], ignore_order=True)

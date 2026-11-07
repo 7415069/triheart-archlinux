@@ -1,0 +1,114 @@
+#!/bin/bash
+# Build a netinst using the unmodified Debian 13 debian-cd build chain.
+set -eo pipefail
+architecture=$1 build=$2 debian_version=$3 profile=${4:-debian}
+sources="$build/01-sources"
+record="$build/02-netinst"
+if [[ $profile != debian ]]; then record="$build/04-iso"; fi
+mirror="$build/.work/mirror"
+mkdir -p "$record" "$build/.work"
+
+# A signed official netinst supplies a bounded local package mirror, rather
+# than downloading the entire Debian archive. Additional build-only packages
+# are checked against the signed archive index by build-iso.
+if [[ $profile == debian ]]; then
+xorriso -osirrox on -indev "$sources/debian-netinst.iso" -extract / "$mirror"
+chmod -R u+w "$mirror"
+cp -al "$sources/firmware-metadata/." "$mirror/dists/trixie/"
+while IFS=$'\t' read -r package path hash; do
+	printf '%s  %s\n' "$hash" "$sources/build-packages/$path" | sha256sum -c -
+	mkdir -p "$mirror/${path%/*}"
+	cp -lf "$sources/build-packages/$path" "$mirror/$path"
+done < "$sources/build-packages.tsv"
+udeb_index="$mirror/dists/trixie/main/debian-installer/binary-$architecture"
+gzip -dc "$udeb_index/Packages.gz" > "$udeb_index/Packages"
+
+# Keep only the authenticated packages present in this bounded mirror.
+# Its generated Release is local build metadata; the input trust comes from
+# the verified ISO and signed Debian archive indexes, recorded separately.
+for component in main non-free-firmware; do
+	index="$mirror/dists/trixie/$component/binary-$architecture"
+	mkdir -p "$index"
+	(cd "$mirror" && dpkg-scanpackages --type deb "pool/$component" /dev/null) > "$index/Packages"
+	pigz -nc "$index/Packages" > "$index/Packages.gz"
+	rm -f "$index/Packages.xz"
+done
+release="$mirror/dists/trixie"
+rm -f "$release/InRelease" "$release/Release.gpg" "$release/Release"
+apt-ftparchive -o APT::FTPArchive::Release::Codename=trixie \
+	-o APT::FTPArchive::Release::Suite=trixie \
+	-o APT::FTPArchive::Release::Architectures="$architecture" \
+	-o APT::FTPArchive::Release::Components='main main/debian-installer non-free-firmware' \
+	release "$release" > "$build/.work/Release"
+mv "$build/.work/Release" "$release/Release"
+
+cp -a /usr/share/debian-cd "$sources/debian-cd"
+cp -L --remove-destination /usr/share/debian-cd/CONF.sh "$sources/debian-cd/CONF.sh"
+printf '%s\n' "$debian_version" > "$record/debian-version.txt"
+fi
+dpkg-query -W -f='${Package}\t${Version}\n' debian-cd > "$record/version.tsv"
+cd "$sources/debian-cd"
+# Source upstream defaults, then set our release and paths. Do not use
+# easy-build.sh: in 3.2.2 it overrides CODENAME with bookworm.
+. ./CONF.sh
+export BASEDIR="$sources/debian-cd" CODENAME=trixie DI_CODENAME=trixie DI_DIST=trixie
+export ARCHES="$architecture" ARCH="$architecture" DEBVERSION="$debian_version"
+export MIRROR="$mirror" TDIR="$build/.work/debian-cd" APTTMP="$build/.work/apt"
+export OUT="$build/.work/netinst-output" DI_DIR="$sources/di/%ARCH%"
+export OFFICIAL=Unofficial DISKTYPE=NETINST INSTALLER_CD=2
+export MAXCDS=1 MAXISOS=1 MAXJIGDOS=0 FORCE_FIRMWARE=1
+# Debian 13 no longer publishes an i386 installer image tree.
+export DISABLE_UEFI_32=1
+# Retain the complete netinst package set and firmware on modern USB media.
+# The historic NETINST size limit in debian-cd 3.2.2 is only 680 MB.
+export FORCE_CD_SIZE=STICK4GB
+export NONFREE=1 NONFREE_COMPONENTS=non-free-firmware
+export OMIT_MANUAL=1 OMIT_RELEASE_NOTES=1 OMIT_DOC_TOOLS=1
+export MKISOFS=xorriso MKISOFS_OPTS='-as mkisofs -r -checksum_algorithm_iso sha256,sha512'
+export DISC_START_HOOK="$sources/project/scripts/netinst-disc-start"
+unset DI_WWW_HOME COMPLETE
+export TASK=debian-installer+kernel
+if [[ $profile != debian ]]; then
+	export LOCAL=1 LOCALDEBS="$build/.work/local"
+	export TRIHEART_COMPONENTS="$build/02-components"
+	export DISC_END_HOOK="$sources/project/scripts/netinst-disc-end"
+	export CDNAME=triheart
+	export DISKINFO_DISTRO='TriHeart Archlinux' VOLID_BASE=TriHeart
+	export SPLASHPNG="$sources/project/installer/branding/boot-splash.png"
+	export DI_DIR="$build/.work/di-brand/%ARCH%"
+fi
+
+make distclean
+
+# apt only reads this local mirror, authenticated above. This doesn't change
+# package verification in either the installer or the installed Arch system.
+mkdir -p "$APTTMP/trixie-$architecture/apt"
+printf 'deb [trusted=yes] file:%s trixie main non-free-firmware main/debian-installer\n' "$MIRROR" \
+	> "$APTTMP/trixie-$architecture/apt/sources.list"
+if [[ $profile != debian ]]; then
+	printf 'deb [trusted=yes] file:%s trixie local local/debian-installer\n' "$LOCALDEBS" \
+		>> "$APTTMP/trixie-$architecture/apt/sources.list"
+fi
+for name in BASEDIR CODENAME DI_CODENAME ARCHES DEBVERSION MIRROR TDIR APTTMP OUT DI_DIR OFFICIAL DISKTYPE INSTALLER_CD; do
+	printf '%s=%q\n' "$name" "${!name}"
+done > "$record/configuration.txt"
+make status
+(find . -type f -print0 | sort -z | xargs -0 sha256sum) > "$record/debian-cd-sources.sha256"
+make official_images
+sha256sum --quiet -c "$record/debian-cd-sources.sha256"
+images=("$OUT"/*.iso)
+[[ ${#images[@]} == 1 && -s ${images[0]} ]] || exit 1
+media_name=debian-netinst.iso
+if [[ $profile != debian ]]; then media_name=triheart-netinst.iso; fi
+mv "${images[0]}" "$record/$media_name"
+cp "$TDIR/trixie/1.mkisofs_opts" "$record/mkisofs-options.txt"
+cp "$TDIR/trixie/CD1/.disk/mkisofs" "$record/xorriso-command.txt"
+cp "$TDIR/trixie/CD1/.disk/info" "$record/disk-info.txt"
+xorriso -indev "$record/$media_name" -report_el_torito plain -report_system_area plain \
+	> "$record/boot-report.txt" 2>&1
+grep -Eq 'El Torito boot img.*UEFI' "$record/boot-report.txt"
+if [[ $architecture == amd64 ]]; then
+	grep -Eq 'El Torito boot img.*BIOS' "$record/boot-report.txt"
+	grep -q 'MBR isohybrid' "$record/boot-report.txt"
+fi
+"$sources/project/scripts/verify-media" "$architecture" "$build" "$record/$media_name" "$record" "$profile"

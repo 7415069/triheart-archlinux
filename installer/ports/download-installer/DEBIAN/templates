@@ -1,5 +1,0 @@
-Template: debian-installer/download-installer/title
-Type: text
-Description: Load installer components from the ISO
-Description-zh_CN.UTF-8: 从 ISO 加载安装程序组件
-Description-zh_TW.UTF-8: 從 ISO 載入安裝程式元件

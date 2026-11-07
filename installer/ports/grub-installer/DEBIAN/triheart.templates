@@ -1,14 +1,26 @@
 Template: triheart/grub/update-nvram
 Type: boolean
 Default: true
-Description: Update EFI boot entries to boot TriHeart automatically?
-Description-zh_CN.UTF-8: 更新 EFI 启动项以自动引导 TriHeart？
+Description: Update EFI boot entries to boot TriHeart Archlinux automatically?
+Description-zh_CN.UTF-8: 更新 EFI 启动项以自动引导 TriHeart Archlinux？
 
 Template: triheart/grub/install
 Type: text
 Description: Installing Arch Linux GRUB and building the boot configuration
 
+Template: triheart/grub/installation-media
+Type: text
+Description: The EFI partition ${DEVICE} belongs to Ventoy. Return to manual partitioning and select the installed system's EFI partition.
+Description-zh_CN.UTF-8: EFI 分区 ${DEVICE} 属于 Ventoy。请返回手动分区，指定目标系统的 EFI 分区。
+
 Template: triheart/grub/failed
 Type: error
 Description: Boot loader installation failed
  ${REASON}
+ .
+ See the grub-installer messages in /var/log/syslog. A copy is saved
+ in /var/log/installer/grub-installer.log on the installed system.
+Description-zh_CN.UTF-8: 引导器安装失败
+ ${REASON}
+ .
+ 请查看 /var/log/syslog 中的 grub-installer 日志。日志副本保存在目标系统的 /var/log/installer/grub-installer.log。

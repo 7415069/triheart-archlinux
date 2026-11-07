@@ -1,0 +1,11 @@
+#!/bin/bash
+set -euo pipefail
+# debian-cd 3.2.2 extracts syslinux and isolinux itself, while Debian 13
+# ships the BIOS modules in syslinux-common. Supply that package through
+# the native start hook without patching boot-x86 or using host modules.
+if [[ $5 == amd64 ]]; then
+	package=$("$BASEDIR/tools/which_deb" "$2" trixie syslinux-common)
+	[[ -n $package ]] || exit 1
+	mkdir -p "$4/../syslinux"
+	dpkg-deb --fsys-tarfile "$2/$package" | tar -xf - -C "$4/../syslinux" ./usr/lib
+fi

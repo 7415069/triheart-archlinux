@@ -12,32 +12,38 @@ fail_step() {
 db_input high triheart/features || [ "$?" -eq 30 ]
 db_go || exit 10
 
-set -- networkmanager sudo plasma-meta plasma-login-manager \
-	noto-fonts noto-fonts-cjk noto-fonts-emoji xorg-xwayland xdg-user-dirs \
-	packagekit-qt6 flatpak firefox libreoffice-fresh \
-	cups cups-filters system-config-printer bluez bluez-utils \
-	pipewire-alsa pipewire-pulse wireplumber ufw libmms fwupd vulkan-mesa-layers
+desktop=true
+[ "$(cat /usr/lib/triheart/profile 2>/dev/null)" != arch-base ] || desktop=false
+set -- networkmanager sudo
+if [ "$desktop" = true ]; then
+	set -- "$@" plasma-meta plasma-login-manager \
+		noto-fonts noto-fonts-cjk noto-fonts-emoji xorg-xwayland xdg-user-dirs \
+		packagekit-qt6 flatpak firefox libreoffice-fresh \
+		cups cups-filters system-config-printer bluez bluez-utils \
+		pipewire-alsa pipewire-pulse wireplumber ufw libmms fwupd vulkan-mesa-layers
 
-# kde-multimedia-meta requires KMix. Keep the other multimedia apps and
-# use Plasma's volume control for the system tray.
-set -- "$@" kde-accessibility-meta kde-education-meta kde-games-meta kde-graphics-meta \
-	kde-network-meta kde-office-meta kde-pim-meta kde-sdk-meta kde-system-meta \
-	kde-utilities-meta kdevelop-meta \
-	audex audiocd-kio audiotube dragon elisa ffmpegthumbs juk k3b kamoso kasts kdenlive kwave plasmatube
+	# kde-multimedia-meta requires KMix. Keep the other multimedia apps and
+	# use Plasma's volume control for the system tray.
+	set -- "$@" kde-accessibility-meta kde-education-meta kde-games-meta kde-graphics-meta \
+		kde-network-meta kde-office-meta kde-pim-meta kde-sdk-meta kde-system-meta \
+		kde-utilities-meta kdevelop-meta \
+		audex audiocd-kio audiotube dragon elisa ffmpegthumbs juk k3b kamoso kasts kdenlive kwave plasmatube
 
-if [ "$(uname -m)" = x86_64 ]; then
-	set -- "$@" vulkan-intel vulkan-nouveau
+	if [ "$(uname -m)" = x86_64 ]; then
+		set -- "$@" vulkan-intel vulkan-nouveau
+	fi
+
+	db_get debian-installer/locale || RET=
+	locale=${RET:-C.UTF-8}
+	case "$locale" in
+		zh_*) set -- "$@" fcitx5 fcitx5-chinese-addons fcitx5-configtool fcitx5-gtk fcitx5-qt ;;
+	esac
+	case "$locale" in
+		zh_CN*|zh_SG*) set -- "$@" firefox-i18n-zh-cn libreoffice-fresh-zh-cn ;;
+		zh_TW*|zh_HK*|zh_MO*) set -- "$@" firefox-i18n-zh-tw libreoffice-fresh-zh-tw fcitx5-chewing ;;
+	esac
+
 fi
-
-db_get debian-installer/locale || RET=
-locale=${RET:-C.UTF-8}
-case "$locale" in
-	zh_*) set -- "$@" fcitx5 fcitx5-chinese-addons fcitx5-configtool fcitx5-gtk fcitx5-qt ;;
-esac
-case "$locale" in
-	zh_CN*|zh_SG*) set -- "$@" firefox-i18n-zh-cn libreoffice-fresh-zh-cn ;;
-	zh_TW*|zh_HK*|zh_MO*) set -- "$@" firefox-i18n-zh-tw libreoffice-fresh-zh-tw fcitx5-chewing ;;
-esac
 
 db_get triheart/features
 ssh_service=
@@ -57,12 +63,13 @@ done
 
 db_progress START 0 100 debian-installer/pkgsel/title
 db_progress INFO triheart/pkgsel/install
-. /usr/lib/triheart/install-packages
-install_packages "$@" || fail_step
+. /usr/lib/triheart/package-progress
+run_package_progress triheart-pkgsel triheart/pkgsel/failed \
+	pacman -Syu --noconfirm --needed --color never "$@" || fail_step
 db_progress SET 98
 db_progress INFO triheart/pkgsel/configure
 . /usr/lib/triheart/configure-target
-if ! configure_target "$ssh_service" "$locale" "$development"; then
+if ! configure_target "$ssh_service" "$locale" "$development" "$desktop"; then
 	fail_step
 fi
 db_progress SET 100

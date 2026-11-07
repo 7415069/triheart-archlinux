@@ -1,0 +1,25 @@
+#!/bin/bash
+# debian-cd DISC_END_HOOK: append the target-system bootstrap payload.
+set -euo pipefail
+tree=$4
+# The gfxterm background remains visible after the graphical menu exits.
+# Clear it instead of loading the splash; removing only desktop-image from
+# the menu theme still exposes the old banner during the kernel handoff.
+if [[ -f $tree/boot/grub/grub.cfg ]]; then
+	sed -i -E 's#^((el)?if background_image) /(isolinux/)?splash\.png; then$#\1; then#' "$tree/boot/grub/grub.cfg"
+	sed -i '\#  ./boot/grub/grub.cfg$#d' "$tree/md5sum.txt"
+	(cd "$tree" && md5sum ./boot/grub/grub.cfg) >> "$tree/md5sum.txt"
+fi
+# Keep debian-cd's generated menu layout and entries, without the background
+# image containing the brand banner. The native theme uses desktop-color.
+if [[ -d $tree/boot/grub/theme ]]; then
+	for theme in "$tree"/boot/grub/theme/[0-9]*; do
+		[[ -f $theme ]] || continue
+		sed -i '/^desktop-image:/d' "$theme"
+	done
+	sed -i '\#  ./boot/grub/theme/[0-9-]*$#d' "$tree/md5sum.txt"
+	(cd "$tree" && find ./boot/grub/theme -maxdepth 1 -type f -name '[0-9]*' -exec md5sum {} +) >> "$tree/md5sum.txt"
+fi
+install -d "$tree/triheart"
+cp -l "$TRIHEART_COMPONENTS/arch-bootstrap.tar.gz" "$tree/triheart/arch-bootstrap.tar.gz"
+(cd "$tree" && md5sum ./triheart/arch-bootstrap.tar.gz >> md5sum.txt)

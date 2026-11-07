@@ -1,0 +1,109 @@
+#!/bin/bash
+# Inspect the produced ISO, not just its staging tree.
+set -euo pipefail
+architecture=$1 build=$2 media=$3 record=$4 profile=$5
+tree="$build/.work/verify-$profile"
+xorriso -osirrox on -indev "$media" -extract / "$tree"
+case "$architecture" in amd64) install_dir=install.amd ;; arm64) install_dir=install.a64 ;; esac
+cmp "$build/01-sources/di/$architecture/cdrom/vmlinuz" "$tree/$install_dir/vmlinuz"
+# Native debian-cd can append accessibility firmware and recompress the GTK
+# initrd. Verify every original file and symlink survives unchanged instead
+# of comparing the gzip stream, which legitimately changes in that case.
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT
+original="$scratch/original"
+generated="$scratch/generated"
+# unmkinitramfs handles every archive segment, including hardlinked symlinks.
+# Extract on the container filesystem, which supports the initrd file types.
+unmkinitramfs "$build/01-sources/di/$architecture/cdrom/gtk/initrd.gz" "$original"
+unmkinitramfs "$tree/$install_dir/gtk/initrd.gz" "$generated"
+(
+	cd "$original"
+	if [[ $profile == debian ]]; then
+		find . -type f -print0
+	else
+		# Only these two brand images replace existing d-i files. All scripts,
+		# fonts already present upstream, modules and libraries stay unchanged.
+		find . -type f ! -path './usr/share/graphics/logo_debian.png' \
+			! -path './usr/share/graphics/logo_debian_dark.png' -print0
+	fi | sort -z | xargs -0 sha256sum
+) > "$record/upstream-initrd-files.sha256"
+(cd "$generated" && sha256sum --quiet -c "$record/upstream-initrd-files.sha256")
+while IFS= read -r -d '' link; do
+	[[ -L $generated/$link && $(readlink "$original/$link") == "$(readlink "$generated/$link")" ]] || exit 1
+done < <(cd "$original" && find . -type l -print0)
+if [[ $profile != debian ]]; then
+	(cd "$generated" && sha256sum --quiet -c "$build/03-initrd/branding-files.sha256")
+	# Both gfxmenu and the underlying terminal must stop loading the splash.
+	# A clean menu screenshot alone misses the terminal revealed on selection.
+	if grep -Eq 'background_image[[:space:]]+/(isolinux/)?splash\.png' "$tree/boot/grub/grub.cfg"; then
+		echo 'GRUB terminal still loads the boot splash.' >&2
+		exit 1
+	fi
+	if [[ -d $tree/boot/grub/theme ]]; then
+		if grep -rIEq '^[[:space:]]*desktop-image[[:space:]]*:' "$tree/boot/grub/theme"; then
+			echo 'GRUB menu theme still loads a background image.' >&2
+			exit 1
+		fi
+	fi
+	FONTCONFIG_PATH="$generated/etc/fonts" FONTCONFIG_FILE="$generated/etc/fonts/fonts.conf" \
+		FONTCONFIG_SYSROOT="$generated" fc-match -f '%{family}\n' \
+		'AR PL ShanHeiSun Uni:charset=4e00' > "$record/chinese-font.txt"
+	grep -Fq 'Noto Sans CJK' "$record/chinese-font.txt"
+	"$build/01-sources/project/scripts/verify-installer-fonts" "$generated" "$record"
+fi
+rm -rf "$original" "$generated"
+gzip -dc "$tree/$install_dir/gtk/initrd.gz" | \
+	cpio -i --quiet --to-stdout var/lib/dpkg/status > "$record/installer-status"
+for package in cdrom-detect cdrom-retriever load-cdrom; do
+	grep -qx "Package: $package" "$record/installer-status"
+done
+kernel=$(sed -n 's/^Package: kernel-image-\(.*\)-di$/\1/p' "$record/installer-status")
+[[ $kernel =~ ^[a-zA-Z0-9.+-]+-$architecture$ ]] || exit 1
+printf '%s\n' "$kernel" > "$record/kernel.txt"
+index="$tree/dists/trixie/main/debian-installer/binary-$architecture/Packages.gz"
+gzip -dc "$index" > "$record/udeb-Packages"
+awk -v kernel="$kernel" '
+	/^Kernel-Version: / { if ($2 != kernel) exit 1; found=1 }
+	END { if (!found) exit 1 }
+' "$record/udeb-Packages"
+printf 'iso_path\tsha256\n' > "$record/verified-files.tsv"
+while IFS=$'\t' read -r path hash; do
+	[[ $path == pool/* && $path != *..* && $hash =~ ^[0-9a-f]{64}$ ]] || exit 1
+	printf '%s  %s\n' "$hash" "$tree/$path" | sha256sum -c -
+	printf '/%s\t%s\n' "$path" "$hash" >> "$record/verified-files.tsv"
+done < <(awk '
+	BEGIN { RS=""; FS="\n"; OFS="\t" }
+	{
+		file=hash=""
+		for(i=1;i<=NF;i++) {
+			if($i ~ /^Filename: /) file=substr($i,11)
+			if($i ~ /^SHA256: /) hash=substr($i,9)
+		}
+		if(file != "") print file,hash
+	}
+' "$record/udeb-Packages")
+test -d "$tree/firmware"
+find -L "$tree/firmware" -maxdepth 1 -type f -name '*.deb' -printf '%f\t%s\n' > "$record/firmware-files.tsv"
+test -s "$record/firmware-files.tsv"
+test -s "$tree/firmware/Contents-firmware"
+if [[ $profile != debian ]]; then
+	cmp "$build/02-components/arch-bootstrap.tar.gz" "$tree/triheart/arch-bootstrap.tar.gz"
+	# Verify every adapted package was selected by native debian-cd.
+	while IFS=$'\t' read -r package version arch; do
+		awk -v package="$package" -v version="$version" '
+			BEGIN { RS=""; FS="\n" }
+			{
+				p=v=""
+				for(i=1;i<=NF;i++) {
+					if($i ~ /^Package: /) p=substr($i,10)
+					if($i ~ /^Version: /) v=substr($i,10)
+				}
+				if(p==package && v==version) found=1
+			}
+			END { exit !found }
+		' "$record/udeb-Packages"
+	done < "$build/02-components/packages.tsv"
+fi
+(cd "$tree" && md5sum --quiet -c md5sum.txt)
+rm -rf "$tree"

@@ -4,33 +4,41 @@ set -euo pipefail
 usage() {
 	cat <<EOF
 Usage
-  $0 <amd64|arm64> [output.iso]
+  $0 <amd64|arm64> [output.iso] [--profile debian|arch-base|triheart] [--keep-work]
   $0 [-h|--help]
 
   amd64        Intel/AMD x86_64. Default dist/triheart-archlinux-x86_64.iso
   arm64        ARM64. Default dist/triheart-archlinux-arm64.iso
   output.iso   Optional output path.
+  --profile    debian: upstream netinst; arch-base: Arch console; triheart: KDE (default).
+  --keep-work  Retain intermediate files after success (failures always retain them).
   -h, --help   Show this help.
 
 Running without arguments shows this help.
 EOF
 }
 
-if [[ $# -eq 0 ]]; then
-	usage
-	exit 0
-fi
-architecture=$1
-case "$architecture" in
-	amd64|arm64) ;;
-	-h|--help) usage; exit 0 ;;
-	*) printf 'Unknown architecture %s\n' "$architecture" >&2; usage >&2; exit 2 ;;
-esac
-if [[ $# -gt 2 ]]; then
-	printf 'Expected an architecture and an optional output path.\n' >&2
-	usage >&2
-	exit 2
-fi
+architecture=
+image=
+profile=triheart
+keep_work=0
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		-h|--help) usage; exit 0 ;;
+		--profile) [[ $# -ge 2 ]] || { usage >&2; exit 2; }; profile=$2; shift ;;
+		--keep-work) keep_work=1 ;;
+		--*) printf 'Unknown option %s\n' "$1" >&2; exit 2 ;;
+		*)
+			if [[ -z $architecture ]]; then architecture=$1
+			elif [[ -z $image ]]; then image=$1
+			else usage >&2; exit 2
+			fi ;;
+	esac
+	shift
+done
+if [[ -z $architecture ]]; then usage; exit 0; fi
+case "$architecture" in amd64|arm64) ;; *) usage >&2; exit 2 ;; esac
+case "$profile" in debian|arch-base|triheart) ;; *) printf 'Unknown profile %s\n' "$profile" >&2; exit 2 ;; esac
 
 project=$(cd -- "$(dirname -- "$0")/.." && pwd)
 output="$project/dist"
@@ -39,32 +47,43 @@ if [[ $architecture == amd64 ]]; then
 	iso_architecture=x86_64
 fi
 iso_name="triheart-archlinux-$iso_architecture.iso"
-image=${2:-"$output/$iso_name"}
+case "$profile" in
+	debian) iso_name="triheart-debian-netinst-$iso_architecture.iso" ;;
+	arch-base) iso_name="triheart-arch-base-$iso_architecture.iso" ;;
+esac
+image=${image:-"$output/$iso_name"}
+mkdir -p -- "$(dirname -- "$image")"
+image="$(cd -- "$(dirname -- "$image")" && pwd)/$(basename -- "$image")"
 if command -v sha256sum >/dev/null; then hash_command=(sha256sum)
 else hash_command=(shasum -a 256)
 fi
 
-mkdir -p "$output/builds" "$output/downloads"
+mkdir -p "$output/builds"
 build=$(mktemp -d "$output/builds/$architecture-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")
 chmod 0755 "$build"
 sources="$build/01-sources"
 snapshot="$sources/project"
-mkdir -p "$snapshot" "$sources/udebs" "$build/02-components" "$build/03-initrd" "$build/04-iso"
+mkdir -p "$build/.work" "$build/02-netinst" "$snapshot" "$sources/udebs" "$build/02-components" "$build/03-initrd" "$build/04-iso"
 printf 'time_utc\tstage\tstatus\n' > "$build/stages.tsv"
 cat > "$build/BUILD.md" <<EOF
 # TriHeart Installer 构建记录
 
-目标架构 **$architecture**。阶段结果以 [stages.tsv](stages.tsv) 为准。
+目标架构 **$architecture**，构建配置 **$profile**。阶段结果以 [stages.tsv](stages.tsv) 为准。
 
 | 阶段 | 文件 |
 | --- | --- |
 | 构建环境 | [实际使用的 Docker 镜像](builder.txt)、[构建日志](build.log) |
-| 来源与验签 | [原始输入](01-sources/)、[来源清单](01-sources/inputs.tsv)、[项目源码快照](01-sources/project/) |
+| 来源与验签 | [输入记录](01-sources/)、[来源清单](01-sources/inputs.tsv)、[udeb 清单](02-netinst/udeb-Packages)、[Debian ISO 验签](01-sources/debian-cd-signature.status)、[项目源码快照](01-sources/project/) |
+| 原版对照 | [debian-cd 配置和打包记录](02-netinst/) |
 | 组件 | [本次生成的 udeb 与 Arch 引导包](02-components/) |
-| initrd | [原始 initrd、覆盖层、合并产物与引导配置](03-initrd/) |
-| ISO | [最终 ISO](04-iso/$iso_name)、[打包命令](04-iso/xorriso-command.txt)、[启动结构](04-iso/boot-report.txt)、[映射文件校验](04-iso/verified-files.tsv) |
+| initrd | [initrd 与覆盖层记录](03-initrd/)、[d-i 内核版本](03-initrd/kernel.txt) |
+| ISO | [最终 ISO 路径](published.tsv)、[打包日志](build.log)、[启动结构](04-iso/boot-report.txt)、[映射文件校验](04-iso/verified-files.tsv) |
 
-[SHA256SUMS](SHA256SUMS) 收录本次输入和产物的校验和。
+[ARTIFACTS.SHA256SUMS](ARTIFACTS.SHA256SUMS) 记录清理前各阶段产物，
+[SHA256SUMS](SHA256SUMS) 可校验清理后实际保留的记录。
+[清理结果](cleanup.tsv)。最终 ISO 路径与校验和见 [发布记录](published.tsv)。
+成功后默认删除下载、展开的镜像树、临时 initrd、重复 ISO 和组件二进制；失败保留现场。
+使用 --keep-work 可以保留完整中间产物。
 EOF
 
 record() {
@@ -85,22 +104,20 @@ run_builder() {
 
 pin_input() {
 	local url=$1 local_file=$2 cache=${3:-} origin=download
+	mkdir -p "${local_file%/*}"
 	if [[ -n $cache && -s $cache ]]; then
 		origin=cache
 		ln "$cache" "$local_file" || cp -p "$cache" "$local_file"
 	else
 		printf 'Download %s\n' "$url"
-		curl --fail --location --retry 3 --output "$local_file.part" "$url"
+		curl --fail --silent --show-error --location --retry 3 --connect-timeout 30 --output "$local_file.part" "$url"
 		mv -- "$local_file.part" "$local_file"
-		if [[ -n $cache ]]; then
-			printf '%s\t%s\n' "$local_file" "$cache" >> "$cache_pending"
-		fi
 	fi
 	printf '%s\t%s\t%s\n' "${local_file#"$sources"/}" "$origin" "$url" >> "$sources/inputs.tsv"
 }
 
 check_hash() {
-	[[ $1 =~ ^[0-9a-f]{64}$ ]]
+	[[ $1 =~ ^[0-9a-f]{64}$ ]] || return 1
 	printf '%s  %s\n' "$1" "$2" | "${hash_command[@]}" --check -
 }
 
@@ -133,7 +150,7 @@ run() (
 	trap 'code=$?; if (( code != 0 )); then record "failed ($code)"; fi; if [[ -n $publish && -f $publish ]]; then unlink "$publish"; fi; exit "$code"' EXIT
 	printf 'Build directory %s\n' "$build"
 	record running
-	(cd "$project" && tar --exclude=.DS_Store -cf - Dockerfile scripts installer) | tar -xf - -C "$snapshot"
+	(cd "$project" && tar --exclude=.DS_Store -cf - Dockerfile scripts installer README.md AGENTS.md LICENSE) | tar -xf - -C "$snapshot"
 	builder=
 	container_build=$build
 	if [[ ${TRIHEART_IN_BUILDER:-} == 1 ]] || [[ -f /.dockerenv && ! -x $(command -v docker || true) ]]; then
@@ -157,96 +174,146 @@ run() (
 	record running
 	debian_archive=${TRIHEART_DEBIAN_MIRROR:-https://deb.debian.org/debian}
 	debian_dist="$debian_archive/dists/trixie"
+	debian_cd_signer=DF9B9C49EAA9298432589D76DA87E80D6294BE9B
+	debian_version=${TRIHEART_DEBIAN_VERSION:-13.7.0}
+	[[ $debian_version =~ ^13\.[0-9]+\.[0-9]+$ ]] || { printf 'Expected a Debian 13 point release.\n' >&2; exit 2; }
+	debian_cd=${TRIHEART_DEBIAN_CD_MIRROR:-https://cdimage.debian.org/cdimage/release}
+	debian_cd="$debian_cd/$debian_version/$architecture/iso-cd"
 	debian_images="main/installer-$architecture/current/images"
-	debian_index="main/debian-installer/binary-$architecture/Packages.gz"
-	debian_iso_path=netboot/gtk/mini.iso
 	if [[ $architecture == arm64 ]]; then
-		arch_mirror=https://mirrors.bfsu.edu.cn/archlinuxarm
+		arch_mirror=${TRIHEART_ARCH_MIRROR:-https://mirrors.bfsu.edu.cn/archlinuxarm}
 		arch_url="$arch_mirror/os/ArchLinuxARM-aarch64-latest.tar.gz"
 		arch_signer=68B3537F39A313B3E574D06777193F152BDBE6A6
 		install_scripts_url="$arch_mirror/aarch64/extra/arch-install-scripts-31-2-any.pkg.tar.xz"
 	else
-		arch_url=https://fastly.mirror.pkgbuild.com/iso/2026.11.01/archlinux-bootstrap-2026.11.01-x86_64.tar.zst
+		arch_mirror=${TRIHEART_ARCH_MIRROR:-https://fastly.mirror.pkgbuild.com}
+		arch_url="$arch_mirror/iso/2026.11.01/archlinux-bootstrap-2026.11.01-x86_64.tar.zst"
 		arch_signer=3E80CA1A8B89F69CBA57D98A76A5EF9054449A5C
 	fi
 	printf 'file\taccess\tupstream_url\n' > "$sources/inputs.tsv"
-	cache_pending="$sources/cache-pending.tsv"
-	: > "$cache_pending"
 	pin_input "$debian_dist/InRelease" "$sources/debian.InRelease"
-	pin_input "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x$arch_signer" \
-		"$sources/arch-release.asc" "$output/downloads/$arch_signer.asc"
-	pin_input "$arch_url" "$sources/${arch_url##*/}" "$output/downloads/${arch_url##*/}"
-	pin_input "$arch_url.sig" "$sources/${arch_url##*/}.sig" "$output/downloads/${arch_url##*/}.sig"
-	if [[ $architecture == arm64 ]]; then
-		pin_input "$install_scripts_url" "$sources/${install_scripts_url##*/}" "$output/downloads/${install_scripts_url##*/}"
-		pin_input "$install_scripts_url.sig" "$sources/${install_scripts_url##*/}.sig" "$output/downloads/${install_scripts_url##*/}.sig"
-	fi
-	run_builder verify-build-sources "$container_build/01-sources" "$arch_signer"
-	pin_input "$debian_dist/$debian_images/SHA256SUMS" "$sources/debian-images.sha256"
-	check_hash "$(debian_hash "$debian_images/SHA256SUMS")" "$sources/debian-images.sha256"
-	iso_hash=$(awk -v path="./$debian_iso_path" '$2 == path { print $1; exit }' "$sources/debian-images.sha256")
-	[[ $iso_hash =~ ^[0-9a-f]{64}$ ]]
-	pin_input "$debian_dist/$debian_images/$debian_iso_path" "$sources/debian-mini.iso" "$output/downloads/debian-gtk-$iso_hash.iso"
-	check_hash "$iso_hash" "$sources/debian-mini.iso"
+	pin_input "$debian_cd/SHA256SUMS" "$sources/debian-cd.sha256"
+	pin_input "$debian_cd/SHA256SUMS.sign" "$sources/debian-cd.sha256.sign"
+	pin_input "https://www.debian.org/CD/key-${debian_cd_signer: -16}.txt" \
+		"$sources/debian-cd.asc" "$output/downloads/$debian_cd_signer.asc"
+	run_builder verify-build-sources "$container_build/01-sources" --debian "$debian_cd_signer"
+	iso_file="debian-$debian_version-$architecture-netinst.iso"
+	iso_hash=$(awk -v name="$iso_file" '$2 == name { print $1; exit }' "$sources/debian-cd.sha256")
+	[[ $iso_hash =~ ^[0-9a-f]{64}$ ]] || exit 1
+	pin_input "$debian_cd/$iso_file" "$sources/debian-netinst.iso" "$output/downloads/$iso_hash.iso"
+	check_hash "$iso_hash" "$sources/debian-netinst.iso"
 
-	index_hash=$(debian_hash "$debian_index")
-	[[ $index_hash =~ ^[0-9a-f]{64}$ ]]
-	pin_input "$debian_dist/$debian_index" "$sources/udebs/Packages.gz" "$output/downloads/udebs-$index_hash.gz"
-	check_hash "$index_hash" "$sources/udebs/Packages.gz"
-	run_builder build-image 01-udeb-index "$architecture" "$container_build" "$iso_name"
-	udeb_repository="$sources/udebs/local"
-	debian_package_files \
-		'user-setup-udeb|netcfg|choose-mirror|apt-setup-udeb|pkgsel|grub-installer|finish-install|download-installer' \
-		< "$udeb_repository/Packages" > "$sources/udebs/selected.tsv"
-	[[ $(wc -l < "$sources/udebs/selected.tsv") -eq 8 ]]
-	debian_package_files '.+' < "$udeb_repository/Packages" > "$sources/udebs/bundled.tsv"
+	# Use cdrom inputs, not netboot/gtk/mini.iso. All hashes chain to InRelease.
+	di_arches=("$architecture")
+	for di_arch in "${di_arches[@]}"; do
+		di_images="main/installer-$di_arch/current/images"
+		sums="$sources/di/$di_arch/SHA256SUMS"
+		pin_input "$debian_dist/$di_images/SHA256SUMS" "$sums"
+		check_hash "$(debian_hash "$di_images/SHA256SUMS")" "$sums"
+		di_files=(cdrom/debian-cd_info.tar.gz)
+		if [[ $di_arch == "$architecture" ]]; then
+			di_files+=(MANIFEST cdrom/vmlinuz cdrom/initrd.gz cdrom/gtk/vmlinuz cdrom/gtk/initrd.gz)
+		fi
+		for di_file in "${di_files[@]}"; do
+			di_hash=$(awk -v path="./$di_file" '$2 == path {print $1; exit}' "$sums")
+			[[ $di_hash =~ ^[0-9a-f]{64}$ ]] || exit 1
+			pin_input "$debian_dist/$di_images/$di_file" "$sources/di/$di_arch/$di_file"
+			check_hash "$di_hash" "$sources/di/$di_arch/$di_file"
+		done
+	done
+
+	# Build-only packages missing from an official netinst package mirror.
+	for index_arch in "$architecture"; do
+		index="main/binary-$index_arch/Packages.gz"
+		pin_input "$debian_dist/$index" "$sources/debian-$index_arch-Packages.gz"
+		check_hash "$(debian_hash "$index")" "$sources/debian-$index_arch-Packages.gz"
+	done
+	build_packages='debootstrap|tasksel-data|task-desktop|debian-archive-keyring'
+	expected_packages=4
+	if [[ $architecture == amd64 ]]; then
+		build_packages="$build_packages|syslinux|syslinux-common|isolinux"
+		expected_packages=7
+	fi
+	if [[ $profile != debian ]]; then
+		build_packages="$build_packages|fonts-noto-cjk"
+		expected_packages=$((expected_packages + 1))
+	fi
+	gzip -dc "$sources/debian-$architecture-Packages.gz" | \
+		debian_package_files "$build_packages" > "$sources/build-packages.tsv"
+	[[ $(wc -l < "$sources/build-packages.tsv") -eq $expected_packages ]] || exit 1
 	while IFS=$'\t' read -r package path hash; do
-		[[ $path =~ ^pool/[a-zA-Z0-9_./+~-]+\.udeb$ && $path != *..* && $hash =~ ^[0-9a-f]{64}$ ]]
-		mkdir -p "$udeb_repository/${path%/*}"
-		pin_input "$debian_archive/$path" "$udeb_repository/$path" "$output/downloads/$hash.udeb"
-		check_hash "$hash" "$udeb_repository/$path"
-	done < "$sources/udebs/bundled.tsv"
-	fonts_index=main/binary-all/Packages.gz
-	fonts_index_hash=$(debian_hash "$fonts_index")
-	[[ $fonts_index_hash =~ ^[0-9a-f]{64}$ ]]
-	pin_input "$debian_dist/$fonts_index" "$sources/debian-all-Packages.gz" "$output/downloads/debian-all-$fonts_index_hash.gz"
-	check_hash "$fonts_index_hash" "$sources/debian-all-Packages.gz"
-	gzip -dc "$sources/debian-all-Packages.gz" | debian_package_files fonts-noto-cjk > "$sources/fonts-noto-cjk.tsv"
-	[[ $(wc -l < "$sources/fonts-noto-cjk.tsv") -eq 1 ]]
-	IFS=$'\t' read -r package font_path font_hash < "$sources/fonts-noto-cjk.tsv"
-	[[ $font_path == pool/*.deb && $font_hash =~ ^[0-9a-f]{64}$ ]]
-	pin_input "$debian_archive/$font_path" "$sources/$package.deb" "$output/downloads/$font_hash.deb"
-	check_hash "$font_hash" "$sources/$package.deb"
-	# Publish only verified downloads to the shared cache.
-	while IFS=$'\t' read -r local_file cache; do
-		ln "$local_file" "$cache" 2>/dev/null || [[ -s $cache ]]
-	done < "$cache_pending"
-	unlink "$cache_pending"
+		[[ $path =~ ^pool/[a-zA-Z0-9_./+~-]+\.deb$ && $path != *..* && $hash =~ ^[0-9a-f]{64}$ ]] || exit 1
+		pin_input "$debian_archive/$path" "$sources/build-packages/$path"
+		check_hash "$hash" "$sources/build-packages/$path"
+	done < "$sources/build-packages.tsv"
+	# Native firmware pattern generation reads the archive's AppStream metadata.
+	for component in main non-free-firmware; do
+		metadata="$component/dep11/Components-$architecture.yml.gz"
+		pin_input "$debian_dist/$metadata" "$sources/firmware-metadata/$metadata"
+		check_hash "$(debian_hash "$metadata")" "$sources/firmware-metadata/$metadata"
+	done
 	record complete
 
-	for stage in 02-components 03-initrd 04-iso; do
+	stage=02-netinst
+	record running
+	run_builder build-netinst "$architecture" "$container_build" "$debian_version"
+	record complete
+	if [[ $profile == debian ]]; then
+		ln "$build/02-netinst/debian-netinst.iso" "$build/04-iso/$iso_name"
+		for file in boot-report.txt verified-files.tsv firmware-files.tsv xorriso-command.txt; do
+			cp "$build/02-netinst/$file" "$build/04-iso/$file"
+		done
+	else
+		stage=02-arch-sources
 		record running
-		run_builder build-image "$stage" "$architecture" "$container_build" "$iso_name"
+		pin_input "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x$arch_signer" \
+			"$sources/arch-release.asc" "$output/downloads/$arch_signer.asc"
+		pin_input "$arch_url" "$sources/${arch_url##*/}" "$output/downloads/${arch_url##*/}"
+		pin_input "$arch_url.sig" "$sources/${arch_url##*/}.sig" "$output/downloads/${arch_url##*/}.sig"
+		if [[ $architecture == arm64 ]]; then
+			pin_input "$install_scripts_url" "$sources/${install_scripts_url##*/}" "$output/downloads/${install_scripts_url##*/}"
+			pin_input "$install_scripts_url.sig" "$sources/${install_scripts_url##*/}.sig" "$output/downloads/${install_scripts_url##*/}.sig"
+		fi
+		run_builder verify-build-sources "$container_build/01-sources" --arch "$arch_signer"
 		record complete
-	done
+		for stage in 01-udeb-index 02-components 03-initrd 04-iso; do
+			record running
+			run_builder build-image "$stage" "$architecture" "$container_build" "$iso_name" "$profile"
+			record complete
+		done
+	fi
 
 	stage=05-publish
 	record running
 	(
 		cd "$build"
-		find 01-sources 02-components 03-initrd 04-iso -type f -print0 |
+		find 01-sources 02-netinst 02-components 03-initrd 04-iso -type f -print0 |
 			xargs -0 "${hash_command[@]}"
-	) > "$build/SHA256SUMS"
+	) > "$build/ARTIFACTS.SHA256SUMS"
 	mkdir -p -- "$(dirname -- "$image")"
-	[[ ! -d $image ]]
+	test ! -d "$image"
 	publish=$(mktemp "$image.part.XXXXXX")
 	if ! ln -f "$build/04-iso/$iso_name" "$publish" 2>/dev/null; then
 		cp -p "$build/04-iso/$iso_name" "$publish"
 	fi
 	mv -f -- "$publish" "$image"
 	publish=
-	printf 'Built %s\nRecord %s\n' "$image" "$build/BUILD.md"
+	printf 'path\tsha256\n%s\t%s\n' "$image" "$("${hash_command[@]}" "$image" | awk '{print $1}')" > "$build/published.tsv"
 	record complete
+	stage=06-cleanup
+	record running
+	if (( keep_work )); then
+		printf 'status\tdetail\nkept\t--keep-work\n' > "$build/cleanup.tsv"
+	else
+		/bin/bash "$snapshot/scripts/clean-build" "$build"
+	fi
+	(
+		cd "$build"
+		find . -type f ! -name SHA256SUMS ! -name build.log ! -name stages.tsv -print0 |
+			xargs -0 "${hash_command[@]}"
+	) > "$build/SHA256SUMS"
+	record complete
+	printf 'Built %s\nRecord %s\n' "$image" "$build/BUILD.md"
 )
 
 run 2>&1 | tee "$build/build.log"

@@ -1,0 +1,63 @@
+#!/bin/bash
+# Shape text with the actual GTK fallback font, rather than testing only a
+# requested CJK family which localechooser may never use.
+set -euo pipefail
+export LC_ALL=C.UTF-8
+root=$1 record=$2
+# Pango/FreeType opens the matched file paths itself and does not prepend
+# FONTCONFIG_SYSROOT. Reuse the extracted rules, with real font paths, so this
+# also works when the ISO architecture differs from the build container.
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT
+mkdir "$scratch/conf.d"
+cp "$root/etc/fonts/fonts.conf" "$scratch/fonts.conf"
+for rule in "$root"/etc/fonts/conf.d/*.conf; do
+	if [[ -L $rule && $(readlink "$rule") == /* ]]; then
+		cp "$root$(readlink "$rule")" "$scratch/conf.d/$(basename "$rule")"
+	else
+		cp -L "$rule" "$scratch/conf.d/$(basename "$rule")"
+	fi
+done
+cat > "$scratch/render.conf" <<EOF
+<fontconfig>
+  <include>$scratch/fonts.conf</include>
+  <reset-dirs/>
+  <dir>$root/usr/share/fonts</dir>
+</fontconfig>
+EOF
+export FONTCONFIG_PATH="$scratch" FONTCONFIG_FILE="$scratch/render.conf"
+unset FONTCONFIG_SYSROOT
+default_font=$(sed -n 's/^DEFAULT_FONT="\([^"]*\)"$/\1/p' "$root/usr/bin/gtk-set-font")
+[[ -n $default_font ]] || exit 1
+pango-view --version > "$record/pango-version.txt"
+printf '安装程序将引导您完成磁盘分区。LVM / OpenSSH\n普通空格：A A；对齐空格：A\u2004A\u2005A\n' > "$record/font-sample.txt"
+printf 'style\ttext\tresolved_font\n' > "$record/rendered-fonts.tsv"
+for style in regular bold; do
+	font="$default_font 9"
+	if [[ $style == bold ]]; then font="$default_font Bold 9"; fi
+	pango-view --no-display --font="$font" --language=zh-cn \
+		--serialize-to="$record/font-layout-$style.json" "$record/font-sample.txt"
+	export TRIHEART_DEFAULT_FONT="$default_font" TRIHEART_FONT_STYLE="$style"
+	perl -MJSON::PP -e '
+		local $/; my $layout = decode_json(<>);
+		die "Unknown glyphs in installer sample\n" if $layout->{output}{"unknown-glyphs"};
+		my ($cjk, $spacing) = (0, 0);
+		for my $line (@{$layout->{output}{lines}}) {
+			for my $run (@{$line->{runs}}) {
+				my $text = $run->{text};
+				my $font = $run->{font}{description};
+				if ($text =~ /[\p{Han}\x{3000}-\x{303f}\x{ff00}-\x{ffef}]/) {
+					die "Unexpected Chinese fallback: $font\n" unless index($font, "Noto Sans CJK SC") == 0;
+					$cjk++;
+				}
+				if ($text =~ /[\x{2004}\x{2005}]/) {
+					die "Changed cdebconf spacing font: $font\n" unless index($font, $ENV{TRIHEART_DEFAULT_FONT}) == 0;
+					$spacing++;
+				}
+				binmode STDOUT, ":encoding(UTF-8)";
+				print "$ENV{TRIHEART_FONT_STYLE}\t$text\t$font\n";
+			}
+		}
+		die "Missing Chinese or spacing runs\n" unless $cjk && $spacing;
+	' "$record/font-layout-$style.json" >> "$record/rendered-fonts.tsv"
+done

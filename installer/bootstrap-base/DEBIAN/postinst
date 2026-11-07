@@ -3,13 +3,14 @@ set -e
 
 . /usr/share/debconf/confmodule
 . /usr/lib/base-installer/library.sh
+. /usr/lib/triheart/package-progress
 
 install_arch_base() {
-	if ! log-output -t triheart-bootstrap /usr/lib/triheart/bootstrap-arch; then
+	if ! run_package_progress triheart-bootstrap triheart-bootstrap/failed; then
 		exit_error triheart-bootstrap/failed
 	fi
 }
 
 waypoint 1 check_target
-waypoint 100 install_arch_base
+waypoint 99 install_arch_base
 run_waypoints triheart-bootstrap/progress

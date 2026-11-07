@@ -1,0 +1,54 @@
+#!/bin/sh
+
+[ -f /var/lib/partman/efi ] || exit 0
+[ ! -f /var/lib/partman/ignore_uefi ] || exit 0
+
+. /lib/partman/lib/base.sh
+. /lib/partman/lib/triheart-efi.sh
+
+count=0
+partitions=
+ventoy=
+for dev in "$DEVICES"/*; do
+	[ -d "$dev" ] || continue
+	cd "$dev"
+	model=$(cat model)
+	open_dialog PARTITIONS
+	while { read_line num id size type fs path name; [ "$id" ]; }; do
+		[ "$fs" != free ] || continue
+		[ -f "$id/method" ] || continue
+		method=$(cat "$id/method")
+		if [ "$method" != efi ]; then
+			[ -f "$id/mountpoint" ] || continue
+			case "$(cat "$id/mountpoint")" in
+				/boot/efi|/efi|/boot) ;;
+				*) continue ;;
+			esac
+			filesystem=$fs
+			if [ -f "$id/filesystem" ]; then
+				filesystem=$(cat "$id/filesystem")
+			fi
+			case "$filesystem" in fat16|fat32|vfat) ;; *) continue ;; esac
+		fi
+		count=$((count + 1))
+		partitions="${partitions:+$partitions, }$path ($model, $(longint2human "$size"))"
+		if is_ventoy_efi "$path"; then ventoy=$path; fi
+	done
+	close_dialog
+done
+
+if [ "$count" -gt 1 ]; then
+	db_subst triheart/efi/multiple PARTITIONS "$partitions"
+	db_input critical triheart/efi/multiple || true
+	db_go || true
+	exit 1
+elif [ -n "$ventoy" ]; then
+	db_subst triheart/efi/installation-media DEVICE "$ventoy"
+	db_input critical triheart/efi/installation-media || true
+	db_go || true
+	exit 1
+elif [ "$count" -eq 0 ]; then
+	db_input critical triheart/efi/missing || true
+	db_go || true
+	exit 1
+fi

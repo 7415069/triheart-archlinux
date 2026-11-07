@@ -1,0 +1,74 @@
+run_package_progress() (
+	log_tag=$1
+	failure_template=$2
+	shift 2
+	db_subst "$failure_template" DETAIL '' || true
+	work=$(mktemp -d /tmp/triheart-packages.XXXXXX) || exit 1
+	trap 'rm -rf "$work"' EXIT
+	mknod "$work/output" p && mknod "$work/events" p || exit 1
+
+	position=0
+	tab=$(printf '\t')
+	for attempt in 1 2; do
+		error=
+		download_error=
+		retry=false
+		previous=
+
+		# Pacman needs a terminal to print numeric progress.
+		LC_ALL=C COLUMNS=160 /usr/lib/triheart/pty-output /usr/lib/triheart/bootstrap-arch "$@" \
+			</dev/null >"$work/output" 2>&1 3>&- &
+		command_pid=$!
+		LC_ALL=C awk -f /usr/lib/triheart/pacman-progress.awk <"$work/output" >"$work/events" 3>&- &
+		parser_pid=$!
+
+		# Keep debconf's replies on stdin and consume command output on fd 7.
+		while IFS="$tab" read -r phase next detail <&7; do
+			if [ "$phase" = log ]; then
+				logger -t "$log_tag" -- "$detail" || true
+				case "$detail" in
+					'error: failed retrieving file '*)
+						download_error=$detail
+						;;
+					'error: failed to synchronize all databases (failed to retrieve some files)'|\
+					'error: failed to commit transaction (failed to retrieve some files)')
+						error=${download_error:-$detail}
+						retry=true
+						;;
+					'error: failed to synchronize all databases ('*)
+						error=$detail
+						if [ -n "$download_error" ]; then
+							error=$download_error
+							retry=true
+						fi
+						;;
+					'error: '*|'==> ERROR: '*) error=${error:-$detail} ;;
+				esac
+				continue
+			fi
+			if [ "$next" -gt "$position" ]; then
+				position=$next
+				db_progress SET "$position" || true
+			fi
+			if [ "$phase:$detail" != "$previous" ]; then
+				template="triheart/packages/$phase"
+				db_subst "$template" DETAIL "$detail" || true
+				db_progress INFO "$template" || true
+				previous="$phase:$detail"
+			fi
+		done 7<"$work/events"
+		wait "$parser_pid" || logger -t "$log_tag" 'Progress parser exited early'
+		if wait "$command_pid"; then
+			exit 0
+		else
+			status=$?
+		fi
+		if [ "$attempt" -eq 2 ] || [ "$retry" != true ]; then
+			db_subst "$failure_template" DETAIL "$(printf '%.240s' "$error")" || true
+			exit "$status"
+		fi
+		db_progress INFO triheart/packages/retry || true
+		logger -t "$log_tag" 'Retrying after a package download failure' || true
+		sleep 2
+	done
+)

@@ -16,7 +16,50 @@ Description-zh_CN.UTF-8: 正在下载并安装经过签名验证的 Arch Linux �
 Template: triheart-bootstrap/failed
 Type: error
 Description: Arch Linux base installation failed
- The Arch Linux packages could not be installed on the selected partitions.
- See /var/log/syslog for details, then return to the installer menu to retry.
+ ${DETAIL}
+ .
+ See /var/log/syslog for details. If a download failed, check the network or choose another Arch mirror, then retry this step.
 Description-zh_CN.UTF-8: Arch Linux 基础系统安装失败
- 无法将 Arch Linux 软件包安装到选定的分区。请查看 /var/log/syslog 中的详细信息，再返回安装菜单重试。
+ ${DETAIL}
+ .
+ 请查看 /var/log/syslog 中的详细信息。如果下载失败，请检查网络或更换 Arch 镜像源，再返回菜单重试。
+
+Template: triheart/packages/prepare
+Type: text
+Description: Synchronizing package databases and resolving dependencies
+Description-zh_CN.UTF-8: 正在同步软件源并解析依赖
+
+Template: triheart/packages/download
+Type: text
+Description: Downloading packages ${DETAIL}
+Description-zh_CN.UTF-8: 正在下载软件包 ${DETAIL}
+
+Template: triheart/packages/download-total
+Type: text
+Description: Packages downloaded ${DETAIL}
+Description-zh_CN.UTF-8: 已下载软件包 ${DETAIL}
+
+Template: triheart/packages/download-finished
+Type: text
+Description: Download phase ended. Preparing package verification.
+Description-zh_CN.UTF-8: 下载阶段已结束，正在准备校验软件包
+
+Template: triheart/packages/verify
+Type: text
+Description: Verifying packages and checking disk space ${DETAIL}
+Description-zh_CN.UTF-8: 正在校验软件包并检查磁盘空间 ${DETAIL}
+
+Template: triheart/packages/apply
+Type: text
+Description: Installing packages ${DETAIL}
+Description-zh_CN.UTF-8: 正在安装软件包 ${DETAIL}
+
+Template: triheart/packages/hooks
+Type: text
+Description: Running post-installation hooks ${DETAIL}
+Description-zh_CN.UTF-8: 正在执行安装后任务 ${DETAIL}
+
+Template: triheart/packages/retry
+Type: text
+Description: Retrying the package download…
+Description-zh_CN.UTF-8: 软件包下载失败，正在重试……

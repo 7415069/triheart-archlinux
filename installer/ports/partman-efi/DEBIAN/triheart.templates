@@ -1,0 +1,37 @@
+Template: triheart/efi/multiple
+Type: error
+Description: Select one EFI System Partition before continuing
+ Several EFI System Partitions are currently selected for use.
+ .
+ ${PARTITIONS}
+ .
+ Return to manual partitioning. Set the partition you want to use to
+ "EFI System Partition" and set the other EFI partitions to "Do not use
+ this partition". Preserve the contents of an existing EFI partition.
+Description-zh_CN.UTF-8: 请手动指定一个 EFI 系统分区
+ 当前有多个 EFI 系统分区被设为使用。
+ .
+ ${PARTITIONS}
+ .
+ 请返回手动分区，将您指定的分区的“用于”设为“EFI 系统分区”，并将其它 EFI 分区设为“不使用此分区”。已有 EFI 分区应保留内容，不要格式化。
+
+Template: triheart/efi/installation-media
+Type: error
+Description: Select the installed system's EFI partition
+ ${DEVICE} is the Ventoy installation medium's EFI partition.
+ .
+ Return to manual partitioning and set this partition to "Do not use
+ this partition". Select the installed system's EFI System Partition.
+Description-zh_CN.UTF-8: 请指定目标系统的 EFI 分区
+ ${DEVICE} 是 Ventoy 安装介质的 EFI 分区。
+ .
+ 请返回手动分区，将此分区设为“不使用此分区”，并指定目标系统的 EFI 系统分区。
+
+Template: triheart/efi/missing
+Type: error
+Description: An EFI System Partition must be selected
+ Return to manual partitioning and set the partition you want to use to
+ "EFI System Partition". If the target disk has no EFI System Partition,
+ create one there. Preserve the contents of an existing EFI partition.
+Description-zh_CN.UTF-8: 尚未指定 EFI 系统分区
+ 请返回手动分区，将您指定的分区的“用于”设为“EFI 系统分区”。如果目标硬盘没有 EFI 系统分区，请在该硬盘上创建一个。已有 EFI 分区应保留内容，不要格式化。
